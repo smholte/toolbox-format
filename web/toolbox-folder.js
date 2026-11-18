@@ -113,10 +113,17 @@
   }
 
   // ───────────────────────── strict JSON (3.4)
-  function controlAt(x, where) {
-    if (typeof x === 'string') return hasControl(x) ? where : null;
-    if (Array.isArray(x)) { for (let i = 0; i < x.length; i++) { const h = controlAt(x[i], `${where}/${i}`); if (h !== null) return h; } return null; }
-    if (x && typeof x === 'object') for (const k of Object.keys(x)) { const h = controlAt(k, `${where}/${k}`) ?? controlAt(x[k], `${where}/${k}`); if (h !== null) return h; }
+  const lone = s => typeof s.isWellFormed === 'function' ? !s.isWellFormed() : /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(s);
+  function textProblem(s) {
+    if (hasControl(s)) return 'holds a control character (line break, tab …)';
+    if (lone(s)) return 'is not UTF-8 text (an unpaired \\ud800–\\udfff escape)';
+    return null;
+  }
+  /** [where, why] of the first key or text that breaks 3.4, or null */
+  function textAt(x, where) {
+    if (typeof x === 'string') { const why = textProblem(x); return why ? [where, why] : null; }
+    if (Array.isArray(x)) { for (let i = 0; i < x.length; i++) { const h = textAt(x[i], `${where}/${i}`); if (h) return h; } return null; }
+    if (x && typeof x === 'object') for (const k of Object.keys(x)) { const why = textProblem(k); if (why) return [`${where}/${k}`, why]; const h = textAt(x[k], `${where}/${k}`); if (h) return h; }
     return null;
   }
 
@@ -129,12 +136,15 @@
     try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch (e) { throw new TbError('json', 'is not UTF-8'); }
     try { doc = JSON.parse(text); } catch (e) { throw new TbError('json', 'is not JSON'); }
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new TbError('json', 'is not a JSON object');
-    const hit = controlAt(doc, '');
-    if (hit !== null) throw new TbError('json', `holds a control character (line break, tab …) at ${hit || '/'}`);
+    let hit;
+    try { hit = textAt(doc, ''); } catch (e) { throw new TbError('json', 'is nested too deep'); }
+    if (hit) throw new TbError('json', `${hit[1]} at ${hit[0] || '/'}`);
     return doc;
   }
 
   const toJson = doc => new TextEncoder().encode(JSON.stringify(doc, null, 2) + '\n');
+  /** JSON text with the keys of every object in order: equal for two equal objects whatever their key order */
+  const canonical = doc => JSON.stringify(doc, (k, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(x => [x, v[x]])) : v);
 
   // ───────────────────────── what a file of the format must look like (the schemas, by hand)
   const str = (min, max) => v => typeof v === 'string' && [...v].length >= min && [...v].length <= max;
@@ -147,9 +157,10 @@
   const https = v => str(1, 300)(v) && v.startsWith('https://');
 
   function shape(doc, required, optional) {
-    for (const k of Object.keys(required)) if (!(k in doc)) return `${k} is missing`;
+    const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);       // not 'constructor', 'toString' … of every object
+    for (const k of Object.keys(required)) if (!own(doc, k)) return `${k} is missing`;
     for (const k of Object.keys(doc)) {
-      const test = required[k] || optional[k];
+      const test = own(required, k) ? required[k] : own(optional, k) ? optional[k] : null;
       if (!test) return `unknown field ${k}`;
       if (!test(doc[k])) return `${k} is not what the format allows`;
     }
@@ -210,11 +221,37 @@
   }
 
   // ───────────────────────── file types: the rules (5.2)
+  const MAX_COUNT = 4294967294;     // the largest number in a count Python's re can hold
+  /** a set [ … ] that starts at p[i]: [index of its closing ], why it is not allowed or null] */
+  function setProblem(p, i) {
+    i++;
+    if (p[i] === '^') i++;
+    if (p[i] === ']') return [i, 'has an empty [] group'];
+    const items = [];                // [text, is a class like \d]
+    while (i < p.length && p[i] !== ']') {
+      if (p[i] === '\\') {
+        const nxt = p[i + 1];
+        if (nxt === undefined) return [i, 'ends with a backslash'];
+        if (/[A-Za-z0-9]/.test(nxt) && !'sSdDwW'.includes(nxt)) return [i, `uses \\${nxt}`];
+        items.push([p.slice(i, i + 2), 'sSdDwW'.includes(nxt)]);
+        i += 2;
+      } else { items.push([p[i], false]); i++; }
+    }
+    if (i >= p.length) return [i, 'has a [ that is never closed'];
+    for (let k = 0; k < items.length;) {       // a - between two items is a range: neither end may be \d, \s, \w …
+      if (k + 2 < items.length && items[k + 1][0] === '-' && !items[k + 1][1]) {
+        if (items[k][1] || items[k + 2][1]) return [i, 'has a range in a set that starts or ends at \\s, \\d or \\w (like [\\d-z])'];
+        k += 3;
+      } else k++;
+    }
+    return [i, null];
+  }
+
   function patternProblem(p) {
     if (typeof p !== 'string' || !p) return 'is empty';
     if (p.length > MAX_PATTERN) return `is longer than ${MAX_PATTERN} characters`;
     for (let i = 0; i < p.length; i++) { const c = p.charCodeAt(i); if (c < 32 || c > 126) return 'holds a character outside plain ASCII'; }
-    let inClass = false, counted = false;
+    let counted = false;
     for (let i = 0; i < p.length; i++) {
       const c = p[i], was = counted;
       counted = false;
@@ -225,17 +262,14 @@
         i++;
         continue;
       }
-      if (inClass) inClass = c !== ']';
-      else if (c === '[') {
-        inClass = true;
-        if (p[i + 1] === '^') i++;
-        if (p[i + 1] === ']') return 'has an empty [] group';
-      } else if (c === '^' || c === '$') return `uses ${c}`;
+      if (c === '[') { const [end, why] = setProblem(p, i); if (why) return why; i = end; }
+      else if (c === '^' || c === '$') return `uses ${c}`;
       else if (c === '.') return 'uses a bare .';
       else if (c === '(' && p[i + 1] === '?') return 'uses a (?…) group';
       else if (c === '{') {
-        const m = /^\{\d+(,\d*)?\}/.exec(p.slice(i));
+        const m = /^\{([0-9]+)(,([0-9]*))?\}/.exec(p.slice(i));
         if (!m) return 'has a { that is not a count';
+        if ([m[1], m[3]].some(n => n && (n.replace(/^0+/, '').length > 10 || Number(n) > MAX_COUNT))) return `has a count larger than ${MAX_COUNT}`;
         i += m[0].length - 1;
         counted = true;
       } else if (c === '*' || c === '+') {
@@ -243,7 +277,6 @@
         counted = true;
       } else if (c === '?') counted = !was;
     }
-    if (inClass) return 'has a [ that is never closed';
     try { new RegExp(p); } catch (e) { return 'is not a pattern'; }
     return null;
   }
@@ -284,8 +317,10 @@
   }
 
   // ───────────────────────── file types: looking at a file (5.3)
-  const u16 = (b, o) => b[o] | (b[o + 1] << 8);
-  const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+  // a number in the bytes; outside them it fails, as Python's struct does (then: "not a zip")
+  const inside = (b, o, n) => { if (!(o >= 0 && o + n <= b.length)) throw new RangeError('outside the bytes'); };
+  const u16 = (b, o) => (inside(b, o, 2), b[o] | (b[o + 1] << 8));
+  const u32 = (b, o) => (inside(b, o, 4), (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0);
   const u64 = (b, o) => u32(b, o) + u32(b, o + 4) * 4294967296;
   const bytesOf = async blob => new Uint8Array(await blob.arrayBuffer());
   let CRC = null;
@@ -325,7 +360,7 @@
         const ent = { flags, method: u16(cd, p + 10), crc: u32(cd, p + 16), csize: u32(cd, p + 20), usize: u32(cd, p + 24), offset: u32(cd, p + 42) + shift };
         if (p + 46 + nameLen + extraLen + commentLen > cd.length) return null;
         const raw = cd.subarray(p + 46, p + 46 + nameLen);
-        const name = flags & 0x800 ? new TextDecoder('utf-8').decode(raw) : String.fromCharCode(...raw);
+        const name = flags & 0x800 ? new TextDecoder('utf-8', { ignoreBOM: true }).decode(raw) : String.fromCharCode(...raw);
         for (let x = p + 46 + nameLen, end = x + extraLen; x + 4 <= end;) {      // zip64 sizes
           const id = u16(cd, x), len = u16(cd, x + 2);
           if (id === 1) {
@@ -525,11 +560,12 @@
       return out;
     }
 
-    /** the built-in types followed by every tool's own, ordered by id; a type two tools define differently is left out */
+    /** the built-in types followed by every tool's own, ordered by id; a type two tools define differently is left out
+        (the order of the keys is no difference) */
     async types() {
       const own = new Map(), clash = new Set();
       for (const { manifest } of await this.all()) for (const t of manifest.types || []) {
-        if (own.has(t.id) && JSON.stringify(own.get(t.id)) !== JSON.stringify(t)) clash.add(t.id);
+        if (own.has(t.id) && canonical(own.get(t.id)) !== canonical(t)) clash.add(t.id);
         if (!own.has(t.id)) own.set(t.id, t);
       }
       return [...TYPES, ...[...own.keys()].filter(k => !clash.has(k)).sort().map(k => own.get(k))];
@@ -643,7 +679,10 @@
       const folder = await this._job(this.me, jobId);
       if (!folder) throw new TbError('bad-job', 'the job is gone');
       let job;
-      try { job = await readDoc(folder, 'job.json', 'job'); } catch (e) { throw new TbError('bad-job', e.message); }
+      try { job = await readDoc(folder, 'job.json', 'job'); } catch (e) {
+        if (e instanceof TbError) throw new TbError('bad-job', e.message);
+        throw new TbError('not-complete', `job.json cannot be read right now (${e.name})`);   // held by another program (2)
+      }
       if (!job) throw new TbError('not-complete', 'no job.json yet');
       if (job.job !== jobId || job.to !== this.me || job.from === job.to) throw new TbError('bad-job', "the job is not for this tool, or its id is not its folder's name");
       const act = manifest.actions.find(a => a.id === job.action);
@@ -653,11 +692,16 @@
         const why = nameProblem(f.name);
         if (why || seen.has(f.name.toLowerCase())) throw new TbError('bad-job', `the file name '${f.name}' ${why || 'is listed twice'}`);
         seen.add(f.name.toLowerCase());
-        let file;
-        try { file = await fileOf(folder, f.name); } catch (e) { throw new TbError('bad-job', `${f.name} is not a plain file`); }
+        let file = null;
+        try { file = await (await folder.getFileHandle(f.name)).getFile(); } catch (e) {
+          if (e.name === 'TypeMismatchError') throw new TbError('bad-job', `${f.name} is not a plain file`);
+          if (e.name === 'TypeError') throw new TbError('bad-job', `the file name '${f.name}' cannot be used on this system`);
+          if (e.name !== 'NotFoundError') throw new TbError('not-complete', `${f.name} cannot be read right now (${e.name})`);
+        }
         if (!file || file.size < f.size) throw new TbError('not-complete', `${f.name} is not complete yet`);
         if (file.size !== f.size) throw new TbError('bad-job', `${f.name} is larger than job.json says`);
-        const { type } = await detectType(file, types, f.name);
+        let type;
+        try { ({ type } = await detectType(file, types, f.name)); } catch (e) { throw new TbError('not-complete', `${f.name} cannot be read right now (${e.name})`); }
         if (type !== f.type) throw new TbError('wrong-type', `${f.name} is ${type}, not ${f.type}`);
         if (!act.accepts.includes(type)) throw new TbError('wrong-type', `${act.label} does not accept ${type} (${f.name})`);
         files.push({ name: f.name, type, file });

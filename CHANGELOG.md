@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.1 – fixes from the first independent review (branch `task/0001-independent-review`, not tagged yet)
+
+No rule of the format changed: `FORMAT.md`, the schemas and `types.json` are as in `v0.1`. One verdict of the checker
+changed: text with an unpaired `\ud800`–`\udfff` escape is now refused (3.4 says UTF-8; before, it passed and then
+broke the reply). Everything else the `v0.1` checker accepted it still accepts. Fixed in the checker and in the
+reference code (a test for each that failed before; the review's report is task 0001 in `smholte/ToolBox`):
+
+- **Crashes of the checker and of a Python tool**: JSON nested a few thousand deep (`RecursionError` in Python
+  3.12+), a number with more than 4300 digits (`ValueError`), a count in a pattern Python cannot hold (`a{4294967295}`,
+  `OverflowError`), a file name the system cannot hold (`OSError`, also aborted the whole check), the same in a
+  house scene's `scene.json` (any tool that looked at the file crashed), and two copies writing `alive.json` at once.
+- **Text that is not UTF-8** (`"\ud800"` escaped in JSON) is refused, as 3.4 says. Before, Python took it and then
+  crashed writing the reply's title, and JavaScript read a file name with it as another file.
+- **JavaScript and Python now agree** on: a range like `[\s-z]` in a pattern (refused), own types written with
+  their keys in another order (the same type), a byte-order mark in a name inside a zip (kept), a zip64 field cut
+  short at the end of the list (not a zip), a key written twice in a house scene's JSON or in a job (the last counts
+  when reading; the checker still refuses it), a date that does not exist in a job or status (refused), a
+  job field named `constructor` or `toString` (refused), a folder in place of a job's file (`bad-job`), a size no
+  file can have (`bad-job`), a `job.json` another program holds open (try again – before: `failed` for good).
+- **Python `send()`** refuses two files whose names differ only in capitals, and shortens a title to 120 characters
+  (as JavaScript did). **`clean()`** deletes only job folders. **Junctions** are told on Python 3.11 too (Blender).
+
+What an app has to change: copy the new `tbf/` files or `web/toolbox-folder.js`. Nothing in the files it writes.
+
 ## 0.1 – tag `v0.1` (18 Nov 2026)
 
 The first version, as changed by its review (FORMAT.md section 13). Compared with the draft the leads read:

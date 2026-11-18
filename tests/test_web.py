@@ -449,3 +449,173 @@ def test_the_trial_page_does_a_round_trip(page, tmp_path):
         receiver.close()
         sender.close()
     assert not errors, errors
+
+
+# ---------------------------------------------------------------- found by the review (task 0001 of smholte/ToolBox)
+# Each case below gave a different answer in JavaScript and Python before its fix.
+import io  # noqa: E402
+import struct  # noqa: E402
+import zipfile  # noqa: E402
+import zlib  # noqa: E402
+
+from tbf.names import JsonError, load_json  # noqa: E402
+
+
+def test_review_patterns_are_judged_the_same(page):
+    patterns = [r"[\s-z]", r"[a-\d]", r"[\d-\w]", r"[\w-a]", r"[\w-]", r"[-\w]", r"[a-z-\w]", r"[\d\s-]", r"[%--]",
+                r"[!-#-%]", "a{4294967294}", "a{4294967295}", "a{1,99999999999}", "a{99999999999999999999}",
+                "a{0004294967294}", r"[\]]", r"[a\-z]", "[^-a]", "[a\\", r"[\b]", "x]"]
+    js = page.evaluate("ps => ps.map(p => ToolboxFolder.patternProblem(p) === null)", patterns)
+    assert js == [pattern_problem(p) is None for p in patterns], list(zip(patterns, js))
+
+
+JSON_CASES = [b'{"t": "\\ud800"}', b'{"t": "a\\udc00b"}', b'{"\\ud83c": 1}', b'{"t": "\\udfe0\\ud83c"}', b'{"t": "\\ud83c\\udfe0"}',
+              b'{"n": 1' + b"0" * 5000 + b"}", b'{"n": -1' + b"0" * 400 + b"}", b'{"n": 1e400}', b'{"a": 1, "a": 2}',
+              b'{"t": "\\u0000"}', b'{"t": "\x7f"}', b'{"t": "\xc2\x85"}', b"\xef\xbb\xbf{}", b'{"n": NaN}', b"[1]"]
+
+
+def test_review_strict_json_is_read_the_same(page):
+    """a reader's view: JavaScript cannot see a key written twice, so the Python reader takes the last one too"""
+    js = page.evaluate("cs => cs.map(c => { try { ToolboxFolder.parseJson(unb64(c)); return true; } catch (e) { return e.code; } })",
+                       [b64(c) for c in JSON_CASES])
+    py = []
+    for c in JSON_CASES:
+        try:
+            load_json(c, "last")
+            py.append(True)
+        except JsonError:
+            py.append("json")
+    assert js == py, [(c[:30], a, b) for c, a, b in zip(JSON_CASES, py, js) if a != b]
+
+
+def _zip(name: str | bytes, data: bytes, flags=0, cd_extra=b"", patch=None) -> bytes:
+    """one stored entry, written by hand so that every field can be set"""
+    name = name.encode() if isinstance(name, str) else name
+    crc = zlib.crc32(data)
+    local = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flags, 0, 0, 0, crc, len(data), len(data), len(name), 0) + name + data
+    cd = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flags, 0, 0, 0, crc, len(data), len(data), len(name),
+                     len(cd_extra), 0, 0, 0, 0, 0) + name + cd_extra
+    if patch:
+        cd = bytearray(cd)
+        for offset, value in patch.items():
+            struct.pack_into("<I", cd, offset, value)
+        cd = bytes(cd)
+    return local + cd + struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(cd), len(local), 0)
+
+
+def _deflated(name: str, data: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_review_zips_are_named_the_same(page, tmp_path):
+    scene = b'{"format":"house-scene"}'
+    own = load_types() + [{"id": "com.example.has-scene", "name": "Has a scene", "extensions": [".zz"], "by_content": True,
+                           "detect": {"zip_has": {"file": "scene.json"}}}]
+    cut_short = struct.pack("<HH", 1, 0)          # a zip64 field that holds nothing, at the very end of the list
+    cases = [("bom.hpscene", _zip(b"\xef\xbb\xbfscene.json", scene, flags=0x800)),
+             ("bom-noflag.hpscene", _zip(b"\xef\xbb\xbfscene.json", scene)),
+             ("usize64.zz", _zip("scene.json", scene, cd_extra=cut_short, patch={24: 0xFFFFFFFF})),
+             ("offset64.zz", _zip("scene.json", scene, cd_extra=cut_short, patch={42: 0xFFFFFFFF})),
+             ("offset64.hpscene", _zip("scene.json", scene, cd_extra=cut_short, patch={42: 0xFFFFFFFF})),
+             ("twice.hpscene", _deflated("scene.json", b'{"format":"x","format":"house-scene"}')),
+             ("twice2.hpscene", _deflated("scene.json", b'{"format":"house-scene","format":"x"}')),
+             ("bigint.hpscene", _deflated("scene.json", b'{"format":"house-scene","n":1' + b"0" * 5000 + b"}")),
+             ("lone.hpscene", _deflated("scene.json", b'{"format":"house-scene","n":"\\ud800"}')),
+             ("plain.hpscene", _zip("scene.json", scene))]
+    got = page.evaluate("""async ([cases, types]) => { const out = []; for (const [name, data] of cases) out.push((await ToolboxFolder.detectType(harness.file(name, data), types)).type); return out; }""",
+                        [[[n, b64(d)] for n, d in cases], own])
+    py = []
+    for i, (name, data) in enumerate(cases):
+        p = tmp_path / str(i) / name
+        p.parent.mkdir()
+        p.write_bytes(data)
+        py.append(detect(p, own)[0])
+    assert got == py, [(c[0], a, b) for c, a, b in zip(cases, py, got) if a != b]
+    assert (py[0], py[-1], py[3]) == ("ext:hpscene", "hpscene", "ext:zz")
+
+
+def test_review_own_types_written_in_another_key_order_are_the_same_type(page, tmp_path):
+    tree = {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.1"}')}
+    for tid, own in (("com.example.a", {"id": "com.example.w", "name": "W", "extensions": [".w"]}),
+                     ("com.example.b", {"name": "W", "extensions": [".w"], "id": "com.example.w"})):
+        m = {"format": "toolbox-tool", "version": "0.1", "id": tid, "name": tid, "kind": "native", "actions": [], "types": [own]}
+        tree[f"tools/{tid}/toolbox.json"] = b64(json.dumps(m).encode())
+    write_tree(tree, tmp_path / "Toolbox")
+    page.evaluate("t => harness.load(t)", tree)
+    js = page.evaluate("async () => (await (await harness.box('com.example.a')).types()).map(t => t.id)")
+    assert js == [t["id"] for t in F.all_types(tmp_path / "Toolbox")] and "com.example.w" in js
+
+
+def _set(key, value):
+    return lambda folder: _edit_job(folder, lambda d: d.update({key: value}))
+
+
+def _edit_job(folder, change):
+    doc = json.loads((folder / "job.json").read_text("utf-8"))
+    change(doc)
+    (folder / "job.json").write_text(json.dumps(doc), "utf-8")
+
+
+def _file_is_a_folder(folder):
+    (folder / "sample-house.hpscene").unlink()
+    (folder / "sample-house.hpscene").mkdir()
+
+
+def _key_twice(folder):
+    text = (folder / "job.json").read_bytes().rstrip()
+    (folder / "job.json").write_bytes(text[:-1] + b', "title": "a", "title": "b"}')
+
+
+REVIEW_JOBS = {
+    "a date that does not exist": (_set("created", "2026-02-30T10:00:00+01:00"), "bad-job"),
+    "a lone surrogate in the title": (_set("title", "\ud800"), "bad-job"),
+    "a lone surrogate in a file name": (lambda f: _edit_job(f, lambda d: d["files"][0].update(name="\ud800.hpscene")), "bad-job"),
+    "a size no file has": (lambda f: _edit_job(f, lambda d: d["files"][0].update(size=2**53 + 1)), "bad-job"),
+    "a folder in place of the file": (_file_is_a_folder, "bad-job"),
+    "a key twice (readers need not notice)": (_key_twice, "ok"),
+    "a field named like a part of every JavaScript object": (_set("constructor", 1), "bad-job"),
+    "a field named toString": (_set("toString", "x"), "bad-job"),
+    "a field named __proto__": (lambda f: (f / "job.json").write_bytes((f / "job.json").read_bytes().rstrip()[:-1]
+                                                                       + b', "__proto__": {"x": 1}}'), "bad-job"),
+    "a version in other digits": (_set("version", "\u0660.\u0661"), "bad-job"),
+    "a huge number in the options": (lambda f: (f / "job.json").write_bytes((f / "job.json").read_bytes().rstrip()[:-1]
+                                                                             + b', "options": {"n": 1' + b"0" * 5000 + b"}}"), "ok"),
+}
+
+
+@pytest.mark.parametrize("name", REVIEW_JOBS)
+def test_review_jobs_get_the_same_answer(page, tmp_path, name):
+    change, expect = REVIEW_JOBS[name]
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    folder = box / "tools" / RENDER / "inbox" / JOB1
+    (folder / "status.json").unlink()
+    change(folder)
+    try:
+        F.take(box, F.read_tool(box, RENDER), folder)
+        py = "ok"
+    except F.JobProblem as p:
+        py = p.code
+    except FileNotFoundError:
+        py = "not-complete"
+    page.evaluate("t => harness.load(t)", tree_of(box) | ({f"tools/{RENDER}/inbox/{JOB1}/sample-house.hpscene/keep": b64(b"")}
+                                                        if name == "a folder in place of the file" else {}))
+    r = page.evaluate("""async ([me, id]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      return harness.tried(() => box.take(m, id).then(() => 'ok')); }""", [RENDER, JOB1])
+    js = r.get("code") or r.get("ok")
+    assert py == js == expect, (py, r)
+
+
+def test_review_a_job_json_held_by_another_program_is_read_later(page):
+    """section 2: what cannot be read right now is "not there yet" – before, JavaScript failed the job for good"""
+    tree = tree_of(SAMPLES / "Toolbox")
+    tree = {k: v for k, v in tree.items() if k != f"tools/{RENDER}/inbox/{JOB1}/status.json"}
+    page.evaluate("t => harness.load(t)", tree)
+    r = page.evaluate("""async ([me, id]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      const real = FileSystemFileHandle.prototype.getFile;
+      FileSystemFileHandle.prototype.getFile = function () { if (this.name === 'job.json') return Promise.reject(new DOMException('held', 'NotReadableError')); return real.call(this); };
+      try { return await harness.tried(() => box.take(m, id).then(() => 'ok')); } finally { FileSystemFileHandle.prototype.getFile = real; } }""", [RENDER, JOB1])
+    assert r.get("code") == "not-complete", r
