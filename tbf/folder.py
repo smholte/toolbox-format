@@ -8,12 +8,15 @@ sections 2, 6 and 7). Plain Python, no Blender. A tool may copy this file togeth
         except JobProblem as p:
             write_status(root, MY_ID, folder.name, "failed", code=p.code, text=p.text)
             continue
-        write_status(root, MY_ID, job["job"], "working", fraction=0.0, text="Starting")
-        ...                                                   # the action
+        if not claim(root, MY_ID, job["job"], "working", fraction=0.0, text="Starting"):
+            continue                                          # another copy of this tool took it
+        ...                                                   # the action; write_status() as it goes
         send_reply(root, MY_MANIFEST, job, [result_path])     # writes the reply job, then the status "done"
+    for folder in unfinished(root, MY_ID): ...                # once, at start: jobs an earlier run left (6.3)
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import shutil
@@ -51,12 +54,33 @@ def new_job_id() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
 
 
-def write_json(path: Path, doc: dict):
-    """whole or not at all: written beside the file, then moved over it"""
-    import json
+STALLED = 5 * 60          # seconds a "working" status is believed after its last update (6.4)
+
+
+def _bytes(doc: dict) -> bytes:
+    return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def write_json(path: Path, doc: dict, tries: int = 5):
+    """Whole or not at all: written beside the file, then moved over it. Windows refuses the move while another
+    program has the file open, so it is tried a few times; after that the OSError is the caller's to catch, and the
+    write is done again at its next look (FORMAT.md section 2)."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes((json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
-    os.replace(tmp, path)
+    tmp.write_bytes(_bytes(doc))
+    for n in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if n == tries - 1:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.05)
+
+
+def is_link(p: Path) -> bool:
+    """a link, or on Windows a junction: never read as a job, never followed when cleaning up"""
+    return p.is_symlink() or bool(getattr(os.path, "isjunction", lambda _p: False)(p))
 
 
 def ensure_folder(root: Path):
@@ -166,9 +190,47 @@ def pending(root: Path, me: str) -> list[Path]:
     inbox = root / "tools" / me / "inbox"
     if not inbox.is_dir():
         return []
-    found = [d for d in inbox.iterdir() if d.is_dir() and is_job_id(d.name) and (d / "job.json").is_file()
-             and not (d / "status.json").is_file()]
+    found = [d for d in inbox.iterdir() if d.is_dir() and not is_link(d) and is_job_id(d.name)
+             and (d / "job.json").is_file() and not (d / "status.json").exists()]
     return sorted(found, key=lambda d: d.name)
+
+
+def unfinished(root: Path, me: str) -> list[tuple[Path, dict]]:
+    """Jobs an earlier run left: those of my inbox whose status is waiting or working, as (folder, status). A tool
+    looks once, at its start: waiting – ask again or start; working – end it as failed, or start it again (6.3)."""
+    inbox = root / "tools" / me / "inbox"
+    out = []
+    for d in sorted(inbox.iterdir()) if inbox.is_dir() else []:
+        if d.is_dir() and not is_link(d) and is_job_id(d.name) and (d / "status.json").is_file():
+            st = read_doc(d / "status.json", "status-0", Report(""), "")
+            if st is not None and st["state"] not in FINAL:
+                out.append((d, st))
+    return out
+
+
+def claim(root: Path, me: str, job: str, state: str = "waiting", **more) -> bool:
+    """Take a job: create its status.json only if it is not there yet. False when another copy of this tool was
+    first (6.3). ``more``: fraction, text, code as for write_status."""
+    doc = {"format": "toolbox-status", "version": VERSION, "job": job, "state": state, "updated": now()}
+    doc.update({k: (v[:200] if k == "text" else v) for k, v in more.items() if v is not None})
+    try:
+        with open(root / "tools" / me / "inbox" / job / "status.json", "xb") as fh:
+            fh.write(_bytes(doc))
+        return True
+    except FileExistsError:
+        return False
+
+
+def is_stalled(status: dict | None, at: datetime | None = None) -> bool:
+    """True when a working status has not been updated for 5 minutes: only then a sender may say that nothing has
+    been heard (6.4). A busy tool cannot write, so a fresh "working" is believed whatever alive.json says."""
+    if not status or status.get("state") != "working":
+        return False
+    try:
+        seen = datetime.fromisoformat(status["updated"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        return True
+    return ((at or datetime.now().astimezone()) - seen).total_seconds() > STALLED
 
 
 def take(root: Path, manifest: dict, folder: Path) -> tuple[dict, list[tuple[str, str, Path]]]:
@@ -237,7 +299,7 @@ def clean(root: Path, me: str, at: float | None = None):
     at = time.time() if at is None else at
     inbox = root / "tools" / me / "inbox"
     for d in list(inbox.iterdir()) if inbox.is_dir() else []:
-        if not d.is_dir():
+        if not d.is_dir() or is_link(d):                # only real folders; a link is never followed
             continue
         age = at - d.stat().st_mtime
         status = read_doc(d / "status.json", "status-0", Report(""), "") if (d / "status.json").is_file() else None
@@ -254,5 +316,6 @@ def clean(root: Path, me: str, at: float | None = None):
 
 def remove_job(root: Path, tool: str, job: str):
     """delete a job folder (a reply I took in; a job I sent whose final status I have read)"""
-    if is_tool_id(tool) and is_job_id(job):
-        shutil.rmtree(root / "tools" / tool / "inbox" / job, ignore_errors=True)
+    folder = root / "tools" / tool / "inbox" / job
+    if is_tool_id(tool) and is_job_id(job) and not is_link(folder):
+        shutil.rmtree(folder, ignore_errors=True)       # what Windows will not let go now goes at the next look

@@ -8,11 +8,7 @@
   "homepage": "https://smholte.github.io/CAD-render-animation/",
   "kind": "native",
   "start": {
-    "program": "C:/Users/sample/AppData/Local/FresingRender/blender/blender.exe",
-    "args": [
-      "--app-template",
-      "fresing_render"
-    ]
+    "program": "C:/Users/sample/AppData/Local/FresingRender/Fresing Render.exe"
   },
   "actions": [
     {

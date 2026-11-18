@@ -162,3 +162,70 @@ def test_the_stand_in_program_answers_a_job(tmp_path):
     assert back.name == st["reply"]
     assert check(root).items == [], check(root).text()
     assert not F.is_alive(root, "nl.fresing.trial.receiver")
+
+
+def test_only_one_copy_takes_a_job(box):
+    job = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])
+    assert F.claim(box, RENDER, job, "waiting", text="Waiting for you in Fresing Render: press Bake now")
+    assert not F.claim(box, RENDER, job, "working")                       # the second copy loses
+    assert F.read_status(box, RENDER, job)["state"] == "waiting" and F.pending(box, RENDER) == []
+    clean(box)
+
+
+def test_jobs_left_from_an_earlier_run(box):
+    a = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])
+    b = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])
+    c = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])
+    F.claim(box, RENDER, a, "waiting")
+    F.claim(box, RENDER, b, "working", fraction=0.5)
+    F.claim(box, RENDER, c, "done")
+    left = {folder.name: st["state"] for folder, st in F.unfinished(box, RENDER)}
+    assert left == {a: "waiting", b: "working"}
+    (box / "tools" / RENDER / "inbox" / a / "status.json").write_bytes(b'{"format": "toolbox-st')   # half written
+    assert [f.name for f, _ in F.unfinished(box, RENDER)] == [b]          # read again at the next look, no crash
+
+
+def test_a_working_job_is_believed_for_five_minutes():
+    from datetime import datetime, timedelta, timezone
+    at = datetime(2026, 11, 18, 20, 0, 0, tzinfo=timezone.utc)
+    st = lambda state, ago: {"state": state, "updated": (at - timedelta(seconds=ago)).isoformat(timespec="seconds")}  # noqa: E731
+    assert not F.is_stalled(st("working", 299), at) and F.is_stalled(st("working", 301), at)
+    assert not F.is_stalled(st("waiting", 9999), at) and not F.is_stalled(st("done", 9999), at) and not F.is_stalled(None, at)
+    assert F.is_stalled({"state": "working", "updated": "2026-11-18T21:00:00+01:00"}, at + timedelta(minutes=6))
+
+
+def test_a_link_is_never_a_job_and_never_followed(box, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("the owner's file")
+    shutil.copy(box / "toolbox-folder.json", outside / "job.json")
+    inbox = box / "tools" / RENDER / "inbox"
+    os.symlink(outside, inbox / "20260101-000000-linked", target_is_directory=True)
+    assert F.pending(box, RENDER) == [] and F.unfinished(box, RENDER) == []
+    F.clean(box, RENDER, at=time.time() + 40 * F.DAY)
+    F.remove_job(box, RENDER, "20260101-000000-linked")
+    assert (outside / "keep.txt").read_text() == "the owner's file"
+
+
+def test_the_stand_in_ends_what_an_earlier_run_left(tmp_path):
+    root = tmp_path / "Toolbox"
+    F.ensure_folder(root)
+    F.write_manifest(root, json.loads((SAMPLES / "Toolbox" / "tools" / PLANNER / "toolbox.json").read_text("utf-8")))
+    from tools.standin import manifest
+    F.write_manifest(root, manifest("nl.fresing.trial.receiver"))
+    old = F.send(root, PLANNER, "nl.fresing.trial.receiver", "bake-house", [SCENE])
+    F.claim(root, "nl.fresing.trial.receiver", old, "working", fraction=0.3)
+    proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "standin.py"), "--folder", str(root), "--seconds", "1", "--once"],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        for _ in range(100):
+            if F.is_alive(root, "nl.fresing.trial.receiver"):
+                break
+            time.sleep(0.1)
+        st = F.read_status(root, "nl.fresing.trial.receiver", old)
+        assert (st["state"], st["code"]) == ("failed", "error")
+        F.send(root, PLANNER, "nl.fresing.trial.receiver", "bake-house", [SCENE])
+        proc.communicate(timeout=30)
+    finally:
+        proc.kill()
+    assert check(root).items == [], check(root).text()

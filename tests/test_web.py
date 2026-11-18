@@ -328,6 +328,51 @@ def test_an_empty_folder_becomes_the_toolbox_folder_and_a_manifest_is_written(pa
     assert r.get("code") == "json", r
 
 
+def test_a_page_never_makes_the_folder(page):
+    page.evaluate("harness.load({})")
+    r = page.evaluate("harness.tried(async () => { await ToolboxFolder.open(await harness.root(), 'nl.fresing.house-planner'); })")
+    assert r.get("code") == "not-toolbox" and "Fresing Render" in r["message"], r
+    assert page.evaluate("harness.dump()") == {}
+    # also not with create = true when the folder is not empty
+    page.evaluate("harness.load({'notes.txt': 'eA=='})")
+    r = page.evaluate("harness.tried(async () => { await ToolboxFolder.open(await harness.root(), 'nl.fresing.house-planner', true); })")
+    assert r.get("code") == "not-toolbox", r
+
+
+def test_a_web_tool_without_an_address_and_one_window_at_a_time(page, tmp_path):
+    tree = manifests_only()
+    key = f"tools/{PLANNER}/toolbox.json"
+    doc = json.loads(base64.b64decode(tree[key]))
+    del doc["url"]
+    page.evaluate("t => harness.load(t)", {**tree, key: b64(json.dumps(doc).encode())})
+    assert page.evaluate("async me => (await (await harness.box(me)).tool(me)).manifest.kind", PLANNER) == "web"
+    got = page.evaluate("""async me => { const box = await harness.box(me); let inner;
+      const outer = await box.exclusively(async () => { inner = await box.exclusively(async () => 'second'); return 'first'; });
+      return [outer, inner === undefined, await box.exclusively(async () => 'free again')]; }""", PLANNER)
+    assert got == ["first", True, "free again"]
+
+
+def test_claim_leftovers_and_a_stalled_job(page, tmp_path):
+    page.evaluate("t => harness.load(t)", manifests_only())
+    scene = b64((SAMPLES / "files" / "sample-house.hpscene").read_bytes())
+    a = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", scene])
+    page.wait_for_timeout(1100)                                          # job ids carry the second
+    b = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", scene])
+    got = page.evaluate("""async ([me, a, b]) => { const box = await harness.box(me);
+      const first = await box.claim(a, 'waiting', { text: 'Waiting for you' }), second = await box.claim(a, 'working');
+      await box.claim(b, 'done');
+      return [first, second, (await box.unfinished()).map(x => [x.id, x.status.state]), await box.pending()]; }""", [RENDER, a, b])
+    assert got == [True, False, [[a, "waiting"]], []]
+    out = dump_and_check(page, tmp_path)
+    assert [(f.name, st["state"]) for f, st in F.unfinished(out, RENDER)] == [(a, "waiting")]
+    from datetime import datetime, timedelta, timezone
+    at = datetime(2026, 11, 18, 20, 0, 0, tzinfo=timezone.utc)
+    cases = [{"state": s, "updated": (at - timedelta(seconds=ago)).isoformat(timespec="seconds")}
+             for s in ("working", "waiting", "done") for ago in (0, 299, 301, 9999)] + [None, {"state": "working"}]
+    js = page.evaluate("([cases, at]) => cases.map(c => ToolboxFolder.stalled(c, at))", [cases, int(at.timestamp() * 1000)])
+    assert js == [F.is_stalled(c, at) for c in cases] and js.count(True) == 3
+
+
 def test_a_broken_or_newer_manifest_of_another_tool(page):
     tree = manifests_only()
     key = f"tools/{RENDER}/toolbox.json"
@@ -378,9 +423,28 @@ def test_the_trial_page_does_a_round_trip(page, tmp_path):
         sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Baking moment')", timeout=15000)
         sender.click("#cancel")
         sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Cancelled')", timeout=15000)
+        # a bake that answers a job this browser did not send is left alone, for another copy
+        box = tmp_path / "Toolbox2"
+        write_tree(sender.evaluate(DUMP), box)
+        stray = F.send(box, "nl.fresing.trial.receiver", "nl.fresing.trial.sender", "import-bake", [SAMPLES / "files" / "sample-house.hpbake"],
+                       reply_to={"tool": "nl.fresing.trial.receiver", "job": "20260101-000000-nobody"})
+        page.evaluate("t => harness.load(t)", tree_of(box))
+        sender.wait_for_function("document.getElementById('report').value.includes('Left alone')", timeout=15000)
+        write_tree(sender.evaluate(DUMP), box)
+        assert (box / "tools" / "nl.fresing.trial.sender" / "inbox" / stray / "job.json").is_file()
+        assert not (box / "tools" / "nl.fresing.trial.sender" / "inbox" / stray / "status.json").exists()
+        # an empty folder is only set up after the owner says so
+        page.evaluate("harness.reset()")
+        sender.goto(base + "?role=sender&opfs=strict")
+        sender.wait_for_selector("#setup:not([hidden])")
+        assert "is empty" in sender.inner_text("#folderState") and sender.evaluate(DUMP) == {}
+        sender.click("#setup")
+        sender.wait_for_function("document.getElementById('folderState').textContent.startsWith('Connected')")
+        assert "toolbox-folder.json" in sender.evaluate(DUMP)
         # after a reload the folder is still known
         sender.reload()
         sender.wait_for_function("document.getElementById('memoryState').textContent.startsWith('Chrome remembered the folder and the permission')")
+        assert not errors, errors
     finally:
         receiver.close()
         sender.close()

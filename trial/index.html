@@ -58,12 +58,13 @@
       <ol class="how" id="howPick">
         <li>Press <b>Pick the Toolbox folder</b>.</li>
         <li>In the window that opens, go to your own user folder: <code>C:\Users\&lt;your name&gt;</code>.</li>
-        <li>The first time: make a new folder there named <code>Toolbox</code>.</li>
+        <li>If there is no <code>Toolbox</code> folder there yet: make a new folder with exactly that name. (Later Fresing Render makes it; for this trial you do.)</li>
         <li>Click the <code>Toolbox</code> folder once and press <b>Select Folder</b>.</li>
         <li>Chrome asks whether this site may edit files. Choose <b>Edit files</b> – and <b>Allow on every visit</b> when Chrome offers it.</li>
       </ol>
       <button id="pick">Pick the Toolbox folder</button>
       <button id="allow" class="plain" hidden>Allow again</button>
+      <button id="setup" class="plain" hidden>Yes, this empty folder is my Toolbox folder – set it up</button>
       <div id="folderState" class="state">Not connected yet.</div>
     </section>
 
@@ -184,9 +185,16 @@ async function connect(viaClick) {
       show('folderState', state === 'denied' ? `Chrome does not let this page use "${root.name}". Press Allow again, or pick the folder once more.` : `Chrome knows the folder "${root.name}" but wants your OK again. Press Allow again.`, 'warn');
       return state;
     }
-    box = await tb.open(root, ME, OPFS ? 'any' : true);
+    try { box = await tb.open(root, ME, OPFS && params.get('opfs') !== 'strict' ? 'any' : viaClick === 'setup'); } catch (e) {
+      let empty = false;
+      if (e.code === 'not-toolbox') { empty = true; for await (const _ of root.keys()) { empty = false; break; } }
+      if (!empty || root.name.toLowerCase() !== 'toolbox') throw e;
+      $('setup').hidden = false;
+      show('folderState', `The folder "${root.name}" is empty. If it is the one directly in your user folder (C:\\Users\\<your name>\\Toolbox), press the button to set it up. If it is anywhere else, pick again.`, 'warn');
+      return;
+    }
     await box.writeManifest(MANIFESTS[ME]);
-    $('allow').hidden = true;
+    $('allow').hidden = $('setup').hidden = true;
     show('folderState', `Connected to the folder "${root.name || 'Toolbox'}". This page is in it as "${MANIFESTS[ME].name}".`, 'good');
     document.querySelectorAll(`section[data-role="${ROLE}"]`).forEach(s => s.classList.remove('off'));
     $('send').disabled = $('watch').disabled = $('cleanup').disabled = false;
@@ -219,9 +227,13 @@ async function onLoad() {
 }
 $('pick').onclick = async () => { if (!OPFS) await tb.forget().catch(() => {}); await connect('pick'); };
 $('allow').onclick = () => connect('allow');
+$('setup').onclick = () => connect('setup');
 
 // ───────── House Planner side
 let current = null, peerTimer = null, inboxBusy = false;
+const sentJobs = { all: () => JSON.parse(localStorage.getItem('toolbox-trial-sent') || '[]'), add(id) { localStorage.setItem('toolbox-trial-sent', JSON.stringify([...this.all(), id].slice(-50))); },
+  drop(id) { localStorage.setItem('toolbox-trial-sent', JSON.stringify(this.all().filter(x => x !== id))); } };   // kept on this device, as House Planner will
+const strangers = new Set();
 async function watchPeer() {
   clearInterval(peerTimer);
   const look = async () => {
@@ -247,6 +259,7 @@ $('send').onclick = async () => {
       onProgress: (a, b) => { $('bar').style.width = (40 * a / b) + '%'; show('sendState', `Writing the house into the stand-in's inbox… ${Math.round(100 * a / b)} %`); } });
     const written = performance.now();
     current = { job, t0, written, seen: null, hiddenAtSend: document.hidden, size: house.blob.size };
+    sentJobs.add(job);
     log(`Sent job ${job}: ${house.blob.size} bytes, made in ${secs(made - t0)}, written in ${secs(written - made)}.`);
     $('cancel').hidden = false;
     follow();
@@ -262,9 +275,10 @@ async function follow() {
     if (st && st.state !== 'sent' && c.seen === null) { c.seen = performance.now(); log(`The stand-in saw the job after ${secs(c.seen - c.written)}.`); }
     if (!st) { show('sendState', 'The job is gone from the inbox.', 'warn'); break; }
     if (st.state === 'sent') show('sendState', 'Written. Waiting for the stand-in to see it…');
+    else if (tb.stalled(st)) show('sendState', `Nothing heard from the stand-in for 5 minutes. Its last word: ${st.text || 'working'}`, 'warn');
     else if (st.state === 'waiting' || st.state === 'working') { show('sendState', st.text || 'The stand-in is working…'); $('bar').style.width = (40 + 50 * (st.fraction || 0)) + '%'; }
     else if (st.state === 'done') { show('sendState', st.reply ? 'Done. Waiting for the bake to arrive in this page\'s inbox…' : `Done, but no bake came back: ${st.text || ''}`, st.reply ? '' : 'warn'); if (!st.reply) break; }
-    else { show('sendState', `${st.state === 'cancelled' ? 'Cancelled' : 'Failed'}: ${st.text || st.code || ''}`, st.state === 'cancelled' ? 'warn' : 'bad'); log(`Job ended: ${st.state} ${st.code || ''} ${st.text || ''}`); await box.remove(RECEIVER, c.job); break; }
+    else { show('sendState', `${st.state === 'cancelled' ? 'Cancelled' : 'Failed'}: ${st.text || st.code || ''}`, st.state === 'cancelled' ? 'warn' : 'bad'); log(`Job ended: ${st.state} ${st.code || ''} ${st.text || ''}`); sentJobs.drop(c.job); await box.remove(RECEIVER, c.job); break; }
     if (c.arrived) break;
     await sleep(1000);
   }
@@ -275,13 +289,20 @@ function watchInbox() {
     if (inboxBusy || !box) return;
     inboxBusy = true;
     try {
+      await box.exclusively(async () => {                            // one window of this site at a time
       for (const id of await box.pending()) {
+        if (strangers.has(id)) continue;
         let taken;
         try { taken = await box.take(MANIFESTS[SENDER], id); } catch (e) {
           if (e.code === 'not-complete') continue;
-          await box.writeStatus(id, 'failed', { code: e.code, text: e.message }); log(`A job in this page's inbox was refused: ${e.code} ${e.message}`); continue;
+          if (await box.claim(id, 'failed', { code: e.code, text: e.message })) log(`A job in this page's inbox was refused: ${e.code} ${e.message}`);
+          continue;
         }
-        const { job, files } = taken, c = current && job.reply_to && job.reply_to.job === current.job ? current : null;
+        const { job, files } = taken, answers = job.reply_to && job.reply_to.job, c = current && answers === current.job ? current : null;
+        if (!c && !sentJobs.all().includes(answers)) {               // not a job this copy sent: leave it for another copy
+          strangers.add(id); log(`Job ${id} in the inbox answers a job this browser did not send (${answers || 'none'}). Left alone.`); continue;
+        }
+        sentJobs.drop(answers);
         const bytes = files.reduce((s, f) => s + f.file.size, 0);
         await files[0].file.slice(0, 64).arrayBuffer();              // really readable
         if (c) {
@@ -293,9 +314,10 @@ function watchInbox() {
           localStorage.setItem('toolbox-trial-roundtrip', new Date().toTimeString().slice(0, 8));
           await box.remove(RECEIVER, c.job);
           current = null;
-        } else log(`A bake arrived for a job this tab did not send just now (job ${id}, answer to ${job.reply_to ? job.reply_to.job : '–'}): ${bytes} bytes. It waited in the inbox – that works.`);
+        } else { log(`A bake arrived for a job sent before this page was opened (job ${id}, answer to ${answers}): ${bytes} bytes. It waited in the inbox – that works.`); await box.remove(RECEIVER, answers); }
         await box.remove(SENDER, id);
       }
+      });
     } catch (e) { log(`ERROR while reading the inbox: ${e.name} ${e.message}`); }
     inboxBusy = false;
   }, 2000);
@@ -306,15 +328,21 @@ let watching = false;
 $('watch').onclick = async () => {
   watching = true; $('watch').hidden = true; $('stop').hidden = false;
   log('Started watching the inbox.');
-  let lastAlive = 0, lastTick = performance.now(), worst = 0;
+  try { for (const { id, status } of await box.unfinished()) { await box.writeStatus(id, 'failed', { code: 'error', text: 'The stand-in was closed while it worked on this' }); log(`Ended job ${id}, left "${status.state}" by an earlier run.`); } } catch (e) { fail('watchState', e); }
+  let lastAlive = 0, lastTick = performance.now(), worst = 0, other = false;
   while (watching) {
     try {
       const gap = performance.now() - lastTick; lastTick = performance.now();
       if (gap > worst + 500 && gap > 3500) { worst = gap; log(`Chrome slowed this tab down: ${secs(gap)} between two looks at the inbox (tab ${document.hidden ? 'hidden' : 'visible'}).`); }
       if (performance.now() - lastAlive > 8000) { await box.alive('0.1'); lastAlive = performance.now(); }
-      const ids = await box.pending();
-      if (!ids.length) show('watchState', `Watching the inbox. ${document.hidden ? '' : 'Nothing there right now.'}`, 'good');
-      for (const id of ids) await bake(id);
+      const mine = await box.exclusively(async () => {
+        const ids = await box.pending();
+        if (!ids.length) show('watchState', `Watching the inbox. ${document.hidden ? '' : 'Nothing there right now.'}`, 'good');
+        for (const id of ids) await bake(id);
+        return true;
+      });
+      if (!mine && !other) { other = true; show('watchState', 'Another tab of the stand-in is working in the inbox; this one waits.', 'warn'); log('Another stand-in tab holds the inbox.'); }
+      if (mine) other = false;
     } catch (e) { fail('watchState', e); }
     await sleep(2000);
   }
@@ -327,11 +355,12 @@ async function bake(id) {
   let taken;
   try { taken = await box.take(MANIFESTS[RECEIVER], id); } catch (e) {
     if (e.code === 'not-complete') return;
-    await box.writeStatus(id, 'failed', { code: e.code, text: e.message }); log(`Refused job ${id}: ${e.code} ${e.message}`); return;
+    if (await box.claim(id, 'failed', { code: e.code, text: e.message })) log(`Refused job ${id}: ${e.code} ${e.message}`);
+    return;
   }
   const { job, files } = taken, t0 = performance.now(), total = Number($('bakeTime').value), house = files[0];
+  if (!await box.claim(id, 'working', { fraction: 0, text: 'Starting to bake' })) return;
   log(`Took job ${id} from ${job.from}: ${house.name}, ${house.file.size} bytes, checked as ${house.type}.`);
-  await box.writeStatus(id, 'working', { fraction: 0, text: 'Starting to bake' });
   for (let s = 1; s <= total; s++) {
     await sleep(1000);
     if (await box.wantsCancel(id)) { await box.writeStatus(id, 'cancelled', { text: 'Stopped because the sender asked' }); show('watchState', 'The sender cancelled the job.', 'warn'); log(`Job ${id} cancelled after ${secs(performance.now() - t0)}.`); $('rbar').style.width = '0'; return; }
@@ -352,7 +381,7 @@ $('cleanup').onclick = async () => {
   watching = false; clearInterval(peerTimer);
   await sleep(2200);                                             // let the watching loop end first
   for (const id of [SENDER, RECEIVER]) try { await box.tools.removeEntry(id, { recursive: true }); } catch (e) { /* not there */ }
-  localStorage.removeItem('toolbox-trial-roundtrip');
+  localStorage.removeItem('toolbox-trial-roundtrip'); localStorage.removeItem('toolbox-trial-sent');
   log('Removed the trial tools from the folder.');
   show('folderState', 'The trial tools are removed from the folder. Reload the page to start again.');
   $('send').disabled = $('watch').disabled = $('cleanup').disabled = true;

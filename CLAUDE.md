@@ -7,9 +7,11 @@ First users: **House Planner** (`smholte/house-planner` public, `smholte/house-p
 
 ## Rules
 
-- **Draft until the owner says otherwise.** 0.1 was written on a branch for a first review; nothing is tagged.
-  Once a version is tagged: changes only by a task, reviewed by the leads of the apps that use the format before
-  they are merged and tagged, as in `house-scene-format`. Never move a tag.
+- **`v0.1` is tagged** (18 Nov 2026, after the first review – FORMAT.md section 13). From here on: changes only by a
+  task, on a branch, reviewed by the leads of the apps that use the format before they are merged and tagged, as in
+  `house-scene-format`. `main` is always a reviewed version. Never move a tag.
+- Licence: MIT (`LICENSE`). The apps copy code from here (Fresing Render is GPL-3.0-or-later); nothing with a
+  licence that forbids that may come in.
 - **Until 1.0** any minor version may change anything, and readers take only their own version (FORMAT.md 3.5).
   Say in `CHANGELOG.md` what an app has to change.
 - **Every change** updates, in the same commit: `FORMAT.md`, the schemas, `types.json` when a type changes,
@@ -53,6 +55,10 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   `\s` on control characters (Python needs `re.ASCII`), `{,3}` (a count in Python, plain text in JavaScript), `a*+`
   (possessive in Python 3.11+, an error in JavaScript), and a time offset `+01:60` (Python reads it).
 - Chrome's permission for a folder belongs to the site (`https://smholte.github.io`), not to one page under it.
+- From the first review: a rule must be one **every kind of tool can follow**. A page cannot see where a folder is,
+  cannot create a file exclusively, cannot write while it closes, cannot tell a link, and may ask for permission
+  only from a click; Blender cannot write while a bake step runs; Windows will not replace a file that is open
+  elsewhere. Each of these broke a rule of the draft.
 - STEP and IFC files both start with `ISO-10303-21;` – only the `FILE_SCHEMA` line tells them apart.
 - JSON-schema messages for "if this then not that" are unreadable; such rules are checked in `tbf/check.py` with a
   plain sentence instead.

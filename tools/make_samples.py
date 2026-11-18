@@ -74,8 +74,7 @@ def make() -> dict[str, bytes]:
         "format": "toolbox-tool", "version": V, "id": RENDER, "name": "Fresing Render", "app_version": "0.0.0-sample",
         "description": "Photo-realistic renders and animations of STEP assemblies; bakes light for House Planner.",
         "homepage": "https://smholte.github.io/CAD-render-animation/", "kind": "native",
-        "start": {"program": "C:/Users/sample/AppData/Local/FresingRender/blender/blender.exe",
-                  "args": ["--app-template", "fresing_render"]},
+        "start": {"program": "C:/Users/sample/AppData/Local/FresingRender/Fresing Render.exe"},
         "actions": [
             {"id": "import-step", "label": "Import STEP", "accepts": ["step"]},
             {"id": "bake-house", "label": "Bake house scene", "accepts": ["hpscene"], "returns": ["hpbake"]}],

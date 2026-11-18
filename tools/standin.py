@@ -36,9 +36,11 @@ def bake(root: Path, me: dict, folder: Path, seconds: float, say) -> str:
     except FileNotFoundError:
         return "not-complete"
     except F.JobProblem as p:
-        F.write_status(root, me["id"], folder.name, "failed", code=p.code, text=p.text)
-        say(f"refused {folder.name}: {p.code} {p.text}")
+        if F.claim(root, me["id"], folder.name, "failed", code=p.code, text=p.text):
+            say(f"refused {folder.name}: {p.code} {p.text}")
         return "failed"
+    if not F.claim(root, me["id"], job["job"], "working", fraction=0.0, text="Starting to bake"):
+        return "taken"                              # another copy of this stand-in was first
     name, kind, path = files[0]
     say(f"took {job['job']} from {job['from']}: {name}, {path.stat().st_size} bytes, checked as {kind}")
     steps = max(1, round(seconds))
@@ -75,6 +77,9 @@ def main(argv=None) -> int:
     def say(text):
         print(time.strftime("%H:%M:%S"), text, flush=True)
 
+    for folder, status in F.unfinished(root, a.me):         # left by an earlier run of this stand-in
+        F.write_status(root, a.me, folder.name, "failed", code="error", text="The stand-in was closed while it worked on this")
+        say(f"ended {folder.name}, left {status['state']} by an earlier run")
     say(f"watching {root / 'tools' / a.me / 'inbox'}  (Ctrl+C stops)")
     last_alive = 0.0
     try:

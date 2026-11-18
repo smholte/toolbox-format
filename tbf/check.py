@@ -159,8 +159,6 @@ def check_manifest(path: Path, rep: Report, builtin: list[dict], folder: str | N
         refs(a.get("returns", []), f"action {a['id']} returns")
     refs(doc.get("sends", []), "sends")
     if doc["kind"] == "web":
-        if "url" not in doc:
-            bad("a web tool needs its url")
         if "start" in doc:
             bad("a web tool has no start (a page is not a program)")
     elif "url" in doc:

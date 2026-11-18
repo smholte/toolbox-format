@@ -8,14 +8,19 @@
      let root = await tb.remembered();                              // the folder picked at an earlier visit
      if (!root) root = await tb.pick();                             // needs a click: opens the folder picker
      if (await tb.permission(root, true) !== 'granted') return;     // true = may ask (needs a click too)
-     const box = await tb.open(root, 'nl.fresing.house-planner');   // checks toolbox-folder.json
+     const box = await tb.open(root, 'nl.fresing.house-planner');   // refuses a folder without toolbox-folder.json
      await box.writeManifest(MY_MANIFEST);
      const job = await box.send({ to: 'nl.fresing.render', action: 'bake-house', files: [file], ret: 'import-bake' });
      const st = await box.status('nl.fresing.render', job);         // { state, fraction, text … } or null
-     for (const j of await box.pending()) {                         // my own inbox: replies and other jobs
-       const { job, files } = await box.take(MY_MANIFEST, j);       // checked: names, sizes, types by content
-       …; await box.remove(box.me, job.job);
-     }
+     await box.exclusively(async () => {                            // one window of this site at a time
+       for (const j of await box.pending()) {                       // my own inbox: replies and other jobs
+         const { job, files } = await box.take(MY_MANIFEST, j);     // checked: names, sizes, types by content
+         if (!mine(job)) continue;                                  // a job this copy cannot place: leave it alone
+         …; await box.remove(box.me, job.job);
+       }
+     });
+
+   A page asks for the permission only from a click (Send, or a "Check" bar) – never at start (FORMAT.md 9).
 
    Everything a tool writes with this file passes check.py of the same version; tests/test_web.py proves it in
    Chrome and compares detectType() with tbf/detect.py file by file. */
@@ -27,6 +32,7 @@
   const FOLDER_FILE = 'toolbox-folder.json';
   const FINAL = ['done', 'failed', 'cancelled'];
   const ALIVE_FRESH = 30;      // seconds
+  const STALLED = 5 * 60;      // seconds a 'working' status is believed after its last update (6.4)
 
   // The built-in types: a copy of types.json ("types"). tests/test_web.py fails when the two differ.
   /* TYPES-BEGIN */
@@ -184,7 +190,6 @@
     const why = docProblem(doc, 'tool');
     if (why) return why;
     if (folderName !== undefined && doc.id !== folderName) return `its id is ${doc.id} but its folder is named ${folderName}`;
-    if (doc.kind === 'web' && !('url' in doc)) return 'a web tool needs its url';
     if (doc.kind === 'web' && 'start' in doc) return 'a web tool has no start';
     if (doc.kind === 'native' && 'url' in doc) return 'a native tool has no url';
     if ('start' in doc && !/^([A-Za-z]:[\\/]|\/)/.test(doc.start.program)) return 'start.program must be the full path of the program';
@@ -530,6 +535,14 @@
       return [...TYPES, ...[...own.keys()].filter(k => !clash.has(k)).sort().map(k => own.get(k))];
     }
 
+    /** Run fn unless another window of this site is doing so right now (then: undefined). For reading the inbox:
+        a page has no exclusive create, so one window at a time looks (6.3). */
+    async exclusively(fn) {
+      if (!global.navigator || !navigator.locks) return fn();
+      return navigator.locks.request('toolbox-format:' + this.me, { ifAvailable: true }, lock => lock ? fn() : undefined);
+    }
+
+    /** optional for a web tool (6.4): a page cannot write while it closes and is slowed down in the background */
     async alive(appVersion) {
       const t = await this._tool(this.me, true), doc = { format: 'toolbox-alive', version: VERSION, seen: now() };
       if (appVersion) doc.app_version = appVersion;
@@ -600,6 +613,29 @@
       return out;
     }
 
+    /** Jobs an earlier run left: those of my inbox whose status is waiting or working, as [{ id, status }].
+        A tool looks once, at its start (6.3). */
+    async unfinished() {
+      const t = await this._tool(this.me), inbox = t && await sub(t, 'inbox'), out = [];
+      if (!inbox) return out;
+      for (const [name, h] of await entries(inbox)) {
+        if (h.kind !== 'directory' || !isJobId(name)) continue;
+        let st = null;
+        try { st = await readDoc(h, 'status.json', 'status'); } catch (e) { /* half there: next time */ }
+        if (st && !FINAL.includes(st.state)) out.push({ id: name, status: st });
+      }
+      return out;
+    }
+
+    /** Take a job: write its first status unless it has one already. true when this call wrote it. A page cannot
+        create a file exclusively, so call this inside exclusively(). */
+    async claim(jobId, state = 'waiting', extra = {}) {
+      const folder = await this._job(this.me, jobId);
+      if (!folder || await fileOf(folder, 'status.json')) return false;
+      await this.writeStatus(jobId, state, extra);
+      return true;
+    }
+
     /** Check a job of my inbox as 6.3 says: { job, files: [{ name, type, file }] }. Throws TbError with the
         status code to write ('bad-job', 'unknown-action', 'wrong-type'), or 'not-complete' when a file is still
         being written (try again shortly). */
@@ -651,23 +687,27 @@
       return reply;
     }
 
-    /** delete a job folder: a reply I took in, or a job I sent whose final status I have read (7.4) */
+    /** Delete a job folder: a reply I took in, or a job I sent whose final status I have read (7.4). false when
+        the system would not let it go right now (another program reads it): try again at the next look. */
     async remove(tool, jobId) {
       const t = await this._tool(tool), inbox = t && await sub(t, 'inbox');
-      if (inbox && isJobId(jobId)) try { await inbox.removeEntry(jobId, { recursive: true }); } catch (e) { if (!missing(e)) throw e; }
+      if (!inbox || !isJobId(jobId)) return true;
+      try { await inbox.removeEntry(jobId, { recursive: true }); return true; } catch (e) { return missing(e); }
     }
   }
 
-  /** Open a picked folder as the Toolbox folder for the tool `me`. With create = true an empty folder named
-      "Toolbox" becomes one ('any': an empty folder of any name – for tests). TbError 'not-toolbox' when it is another folder, 'version' when it is of another version. */
-  async function open(root, me, create = true) {
+  /** Open a picked folder as the Toolbox folder for the tool `me`. TbError 'not-toolbox' when it holds no
+      toolbox-folder.json, 'version' when it is of another version. A web tool never makes the folder: a page cannot
+      see where the folder lies (FORMAT.md 2). `create` is for the trial page (true: an empty folder named "Toolbox"
+      becomes one) and for tests ('any': an empty folder of any name). */
+  async function open(root, me, create = false) {
     if (!isToolId(me)) throw new TbError('json', `${me} is not a tool id`);
     let marker;
     try { marker = await readDoc(root, FOLDER_FILE, 'folder'); } catch (e) { throw new TbError(e.code === 'version' ? 'version' : 'not-toolbox', e.message); }
     if (!marker) {
       const empty = (await entries(root)).filter(([n]) => !n.endsWith('.crswap')).length === 0;
       const named = create === 'any' || root.name.toLowerCase() === 'toolbox';
-      if (!create || !empty || !named) throw new TbError('not-toolbox', `This is not the Toolbox folder: there is no ${FOLDER_FILE} in "${root.name}".`);
+      if (!create || !empty || !named) throw new TbError('not-toolbox', `This is not the Toolbox folder: there is no ${FOLDER_FILE} in "${root.name}". A program that uses the toolbox, like Fresing Render, makes the folder.`);
       await write(root, FOLDER_FILE, toJson({ format: 'toolbox-folder', version: VERSION }));
     }
     const box = new Box(root, me);
@@ -675,8 +715,16 @@
     return box;
   }
 
+  /** true when a working status has not been updated for 5 minutes: only then say that nothing has been heard.
+      A busy tool cannot write, so a fresh 'working' is believed whatever alive.json says (6.4). */
+  function stalled(status, at = Date.now()) {
+    if (!status || status.state !== 'working') return false;
+    const seen = Date.parse(status.updated);
+    return Number.isNaN(seen) || at - seen > STALLED * 1000;
+  }
+
   global.ToolboxFolder = {
-    VERSION, TYPES, FINAL, TbError, supported, remembered, remember, forget, pick, permission, open,
+    VERSION, TYPES, FINAL, TbError, stalled, supported, remembered, remember, forget, pick, permission, open,
     detectType, nameProblem, timeProblem, patternProblem, ruleProblem, typeProblem, docProblem, manifestProblem,
     parseJson, toJson, now, newJobId, isToolId, isJobId, crc32,
   };

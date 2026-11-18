@@ -1,4 +1,4 @@
-# Toolbox format – version 0.1 (draft)
+# Toolbox format – version 0.1
 
 How tools on one PC find each other and hand files to each other, with no app in between: a tool describes itself
 in a small file, and a file goes to another tool by being put in that tool's inbox folder.
@@ -8,15 +8,15 @@ House Planner  ── writes a job into Fresing Render's inbox ──▶  Fresin
 Fresing Render ── writes the result as a job into House Planner's inbox ──▶  House Planner shows the baked light
 ```
 
-Status: **draft 0.1 (18 Nov 2026). Not reviewed by the leads of House Planner and Fresing Render yet, no tag.**
-Step D of the toolbox plan (format only, no app); the later steps (a background router, the toolbox window) read the
+Status: **version 0.1, reviewed by the leads of House Planner and Fresing Render on 18 Nov 2026 and changed as they
+asked (section 13); tag `v0.1`.** Step D of the toolbox plan (format only, no app); the later steps (a background router, the toolbox window) read the
 same folder and add to this text. The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. The schemas in
 `schemas/` and the type list `types.json` are part of this text; where they and this text differ, it is a bug in one
 of them.
 
 Contents: 1 Ideas · 2 The Toolbox folder · 3 Names, JSON and versions · 4 The manifest · 5 File types ·
 6 Sending a job · 7 Status, replies, cancelling and cleaning up · 8 A round trip · 9 A web page and the folder ·
-10 Safety · 11 Samples and the checker · 12 Not in 0.1 · 13 Open questions
+10 Safety · 11 Samples and the checker · 12 Not in 0.1 · 13 Decided in the first review
 
 ---
 
@@ -66,8 +66,11 @@ Toolbox/
       inbox/ …
 ```
 
-`toolbox-folder.json` is `{"format": "toolbox-folder", "version": "0.1"}`. The first tool that needs the folder
-makes it, with this file and `tools/`.
+`toolbox-folder.json` is `{"format": "toolbox-folder", "version": "0.1"}`. **Only a native tool makes the folder**,
+with this file and `tools/`, when it is installed or first started: a program knows where the user's home folder is.
+A web page cannot see where a picked folder lies, so a web tool MUST NOT make `toolbox-folder.json` – a folder named
+`Toolbox` somewhere else (in Documents, on a stick) would be marked by mistake. A web tool that finds no such file
+says that this is not the Toolbox folder, and that a tool like Fresing Render makes it.
 
 **Who writes what.** A tool writes only:
 
@@ -77,6 +80,14 @@ makes it, with this file and `tools/`.
 
 A tool MUST NOT change another tool's manifest or a job's `job.json` and files after they are written. A reader MUST
 ignore entries it does not know (browsers leave short-lived `.crswap` files while they write).
+
+**Other programs read and write at the same moment.** Windows refuses to replace or delete a file another program has
+open. So everywhere in this format: a write by rename, or a delete, that fails is tried again at the next look; a
+reader that finds a file missing, empty or half there treats it as "not there yet" and tries again at its next look.
+Neither is an error.
+
+**A tool may run as several copies** that share one tool folder and one inbox: two windows of a program, a page open
+in two tabs, a web tool's page and a downloaded copy of it. Section 6.3 says how only one copy takes a job.
 
 A tool SHOULD write its manifest again at every start and after every update, so its version and paths are right.
 Uninstalling a tool removes its tool folder.
@@ -110,10 +121,13 @@ Files lie directly in the job folder; folders inside a job are not part of 0.1.
 
 ### 3.4 JSON
 
-Every JSON file of this format: UTF-8 without a byte-order mark, one object, at most 1 MiB, no key twice, no `NaN`
-or `Infinity`, and no control characters (line breaks, tabs …) in any text or key – so JavaScript and Python read the
-same thing. (JavaScript cannot see a key written twice – its last one wins – so a writer MUST NOT write one, and the
-checker refuses it.) Each starts with `"format"` (which file it is) and `"version"`. Unknown fields are an error in 0.x.
+Every JSON file of this format: UTF-8, one object, at most 1 MiB, no `NaN` or `Infinity`, and no control characters
+(line breaks, tabs …) in any text or key – so JavaScript and Python read the same thing. A reader MUST refuse a file
+that breaks one of these.
+
+Two more are **rules for the writer, which the checker checks**: no byte-order mark at the start, and no key twice in
+one object. A reader MAY refuse them and need not notice them – a browser's `JSON.parse` keeps the last of two equal
+keys and its text decoder drops the mark without a word. Each starts with `"format"` (which file it is) and `"version"`. Unknown fields are an error in 0.x.
 
 Times are written `2026-11-18T19:51:00+01:00`: date, `T`, clock time to the second (thousandths MAY follow), and
 the offset from UTC (`+00:00` to `+23:59`, or `-`) or `Z`.
@@ -139,8 +153,7 @@ Tools pin a tag of this repository (`v0.1`, …) and test against its samples.
   "description": "Photo-realistic renders and animations of STEP assemblies.",
   "homepage": "https://smholte.github.io/CAD-render-animation/",
   "kind": "native",
-  "start": { "program": "C:/Users/sample/AppData/Local/FresingRender/blender/blender.exe",
-             "args": ["--app-template", "fresing_render"] },
+  "start": { "program": "C:/Users/sample/AppData/Local/FresingRender/Fresing Render.exe" },
   "actions": [
     { "id": "import-step", "label": "Import STEP", "accepts": ["step"] },
     { "id": "bake-house", "label": "Bake house scene", "accepts": ["hpscene"], "returns": ["hpbake"] }
@@ -157,8 +170,8 @@ Tools pin a tag of this repository (`v0.1`, …) and test against its samples.
 | `actions` | required | what can be asked of the tool (may be empty) |
 | `app_version` | | the tool's own version, as it shows it |
 | `description`, `homepage` | | one or two sentences; an `https://` address |
-| `url` | web: required | the page's `https://` address. A native tool has none |
-| `start` | native only | the program's full path and fixed arguments. Recorded for the router of the next step; nothing in 0.1 starts a tool |
+| `url` | web only | the tool's `https://` address on the web. Every copy of the tool writes the same one, also a copy opened from a downloaded file; a web tool with no address on the web leaves it out. A native tool has none |
+| `start` | native only | what the user's own shortcut starts: the program's full path and fixed arguments (not a console program that opens a black window). Recorded for the router of the next step; nothing in 0.1 starts a tool |
 | `icon` | | file name of a PNG or SVG next to the manifest |
 | `types` | | the tool's own file types (5.1) |
 | `sends` | | file types the tool hands to others on its own |
@@ -291,17 +304,41 @@ folder **without a `status.json`**:
    by the tool itself** (5.3) – is the stated type and one the action accepts.
 4. Anything wrong: write `status.json` with `failed` and a `code` (7.1), and do nothing else with the job. A file
    whose size is still short MAY get up to a minute before this.
-5. Otherwise write `status.json` (`waiting` or `working`) and do the action.
+5. Otherwise take the job – write `status.json` (`waiting` or `working`), as "Only one copy takes a job" below
+   says – and do the action.
 
 A tool MAY ask its user before it starts ("House Planner sent a house. Bake it now?") or just start; that is the
-tool's choice and may depend on `options`.
+tool's choice and may depend on `options`. While it waits for its user the status is `waiting` and its `text` says
+so ("Waiting for you in Fresing Render: press Bake now"), so the sender can show it.
+
+**Only one copy takes a job.** A tool that can run as several copies makes sure of it:
+
+- A **native tool** takes a job by creating `status.json` only if it is not there yet (an exclusive create – the
+  system refuses when the file exists). The copy that loses leaves the job alone. A file made this way may be seen
+  half written for a moment; readers try again (section 2).
+- A **web tool** has no exclusive create. It lets one window at a time read the inbox (the browser's Web Locks do
+  that for the windows of one site), and a copy takes only a job it can place: a reply to a job this copy sent, a
+  file for a house this copy holds. A job it cannot place it leaves alone, without a status, for another copy.
+
+**Jobs left from an earlier run.** At its start a tool also takes up the jobs of its inbox whose status is not final:
+`waiting` – it asks its user again, or starts; `working` – nobody is working on it any more, so the tool either ends
+it (`failed`, code `error`, "Fresing Render was closed while it worked on this") or starts it again.
 
 ### 6.4 `alive.json`
 
 `{"format": "toolbox-alive", "version": "0.1", "seen": "<time>", "app_version": "1.4.0"}` in the tool's folder.
-A tool that watches its inbox SHOULD write it at least every 10 seconds and delete it when it closes. A sender reads
-it to tell its user what to expect: `seen` within the last 30 seconds = "Fresing Render is open"; older or missing =
-"Open Fresing Render and it will pick the house up". A job MAY be sent either way; it waits in the inbox.
+A **native tool** that watches its inbox SHOULD write it at least every 10 seconds whenever it is free to, and delete
+it when it closes (when several copies run: only the copy that wrote the newest one). For a **web tool** it is
+optional (MAY): a page cannot write while it closes and is slowed down in the background, so its file says little.
+
+A sender reads it to tell its user what to expect: `seen` within the last 30 seconds = "Fresing Render is open";
+older or missing = "Open Fresing Render and it will pick the house up". A job MAY be sent either way; it waits in the
+inbox.
+
+**A busy tool is not a closed tool.** A program in the middle of heavy work (one bake step can block Blender for
+many seconds) writes neither `alive.json` nor `status.json` meanwhile. So for a job whose status is `working`, the
+sender says "working" with the last `text` – not "not open" – whatever `alive.json` says, until that status's
+`updated` is more than 5 minutes old. Only then it may say that nothing has been heard for a while.
 
 ## 7. Status, replies, cancelling and cleaning up
 
@@ -327,8 +364,10 @@ Written only by the receiving tool, in the job's folder, whole each time (as `jo
 (the job itself is wrong), `unknown-action`, `wrong-type`, `busy`, `error` – a reader MUST take an unknown code as
 `error`. `text` is one line, at most 200 characters.
 
-The sender reads `tools/<to>/inbox/<job>/status.json` (not more often than once a second) to show progress. A job
-folder that is gone means the job is over and cleaned up.
+The sender reads `tools/<to>/inbox/<job>/status.json` (not more often than once a second) to show progress. A
+`status.json` that cannot be read at one look (it is just being replaced) is read again at the next. A `working`
+status stays believed for 5 minutes after its `updated` (6.4). A job folder that is gone means the job is over and
+cleaned up.
 
 ### 7.2 The result comes back as a reply job
 
@@ -353,6 +392,10 @@ final stays as it is.
   status is final.
 - The **sender** MAY delete a job it sent once it has read a final status.
 - **Anyone** MAY delete a job folder older than 30 days, with or without `job.json`.
+
+A delete that fails (another program still reads a file) is tried again at the next look. Cleaning up deletes only
+real folders and files inside an inbox: an entry that is a link, a shortcut or a junction is never followed and never
+deleted through.
 
 ## 8. A round trip
 
@@ -379,7 +422,10 @@ A page cannot reach a folder by itself. What works today, checked 18 Nov 2026:
 - **The owner picks the Toolbox folder once.** The page keeps the folder's handle; since Chrome 122 the owner can
   choose "Allow on every visit", and an installed web app keeps the permission by itself
   ([Chrome's note](https://developer.chrome.com/blog/persistent-permissions-for-the-file-system-access-api)).
-  Without that the browser asks again at the next visit, with one click.
+- **A page asks only when its user acts.** At its start a web tool reads the folder only when the browser still
+  holds the permission. When it does not, the browser will ask again – and may only be made to ask from a click. So
+  the tool asks at the moment the user presses Send, or shows a small bar ("A bake may be waiting – Check") whose
+  button asks. It never asks at start, and it works without the folder until then.
 - **Chrome refuses some folders**: the home folder itself, `AppData` (Local and Roaming), `Program Files`,
   `Windows`, `~/Library` and others, with everything inside them; folders *inside* the home folder are fine
   ([the list in Chromium](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/file_system_access/chrome_file_system_access_permission_context.cc)).
@@ -387,10 +433,13 @@ A page cannot reach a folder by itself. What works today, checked 18 Nov 2026:
 - **Chrome gives the folder to a site, not to one page.** A site is the address up to the first slash:
   `https://smholte.github.io/house-planner/` and every other page under `https://smholte.github.io` are one site
   and share the permission and the kept folder. Put only pages you trust under the same address as a tool.
-- The page SHOULD check that the picked folder holds `toolbox-folder.json` (or is empty and named `Toolbox`, then it
-  makes the file) and say so plainly when it is another folder.
+- The page MUST check that the picked folder holds `toolbox-folder.json` and say so plainly when it does not. It
+  never makes that file itself (section 2).
 - A page reads and writes only while it is open, and a tab in the background is slowed down by the browser. A reply
-  waits in the page's inbox until the page is opened – that is fine (section 8, step 5).
+  waits in the page's inbox until the page is opened – that is fine (section 8, step 5). A page need not look at its
+  inbox every 2 seconds: often while a job of its own is out and its tab is visible, seldom otherwise.
+- A page cannot tell whether an entry of the folder is a link; the rules about links (section 10) bind a tool only
+  where it can tell.
 - A web tool writes its own manifest into `tools/<its id>/` when the folder is picked, and again when its version
   changes.
 
@@ -401,7 +450,8 @@ A page cannot reach a folder by itself. What works today, checked 18 Nov 2026:
 - A receiving tool does **only actions of its own manifest**. A job cannot name a program, a path outside its own
   folder, or a script. `options` are settings of the action, never commands.
 - A receiving tool **checks before it opens**: the file names (3.3 – nothing leaves the job folder), the sizes, and
-  the file types by content (5.3). A link or shortcut in place of a file is refused.
+  the file types by content (5.3). A link, shortcut or junction in place of a file or a job folder is refused, and
+  cleaning up never follows one (7.4) – where the tool can tell: a native tool can, a web page cannot.
 - A tool reads `start` of another tool's manifest for nothing in 0.1. The later router starts programs only from
   manifests in this folder and shows the command the first time.
 - A web tool gets no more than the one folder its user picked.
@@ -434,7 +484,9 @@ same code, and read each other's jobs.
 
 **The trial** (`trial/index.html`) is a page with two sides, one playing House Planner and one playing Fresing
 Render, for trying the folder on a real PC before any app is changed. `tools/standin.py` plays the receiving side
-as a program.
+as a program. The trial page is the one exception to "a web page never makes the folder": no native tool makes it
+yet, so the page offers a button that turns an empty folder named `Toolbox` into the Toolbox folder, after saying
+where that folder must be.
 
 ## 12. Not in 0.1
 
@@ -448,11 +500,25 @@ Planned for the steps after this one, and deliberately left out now:
 - Converters and chains (an action that turns one type into another on the way), labels in other languages,
   folders inside a job, a Toolbox folder shared over a network.
 
-## 13. Open questions for the first review
+## 13. Decided in the first review (18 Nov 2026)
 
-1. Does Fresing Render start baking by itself when a house arrives, or ask first? (The format allows both.)
-2. Is looking at the inbox every 2 seconds fine inside Blender (a timer) and inside House Planner (a page)?
-3. Where does House Planner keep the list of jobs it sent – with the house (next to `hpScenes`) or with the device?
-4. A day before a finished job is deleted (7.4): too long for big bakes? The files may go at once, only the two small
-   JSON files stay.
-5. The licence of this repository.
+Both leads read the draft; the owner carried their answers. What they changed is in the sections named.
+
+| Question or finding | Decided | Where |
+| --- | --- | --- |
+| Does Fresing Render bake by itself when a house arrives? | It asks once per job ("Bake now"); the status is `waiting` meanwhile | 6.3 |
+| A look at the inbox every 2 seconds? | Fine in Blender and in a page; a page looks seldom when none of its jobs is out | 6.3, 9 |
+| Where does House Planner keep its sent jobs? | On the device, not with the house | – |
+| A day before a finished job is deleted? | Fine; the job's files go at once, the two small JSON files stay the day | 7.4 |
+| A program cannot write while it works hard | A `working` job is believed for 5 minutes | 6.4, 7.1 |
+| Jobs left by a run that closed or crashed | Taken up again at the next start | 6.3 |
+| Two copies of one tool | An exclusive create for programs; one window at a time and "only what I can place" for pages | 2, 6.3 |
+| Windows refuses to replace or delete an open file | Try again at the next look; never an error | 2, 7.4 |
+| A page cannot see where a folder is | Only a native tool makes the Toolbox folder | 2, 9 |
+| A page may ask for permission only from a click | It asks when its user acts | 9 |
+| `alive.json` from a page | Optional | 6.4 |
+| "No key twice", "no byte-order mark" | Rules for the writer; the checker checks | 3.4 |
+| Links | Refused and never followed, where the tool can tell | 7.4, 10 |
+| `url` of a web tool | Optional; every copy writes the same one | 4 |
+| The sample's `start.program` | What the user's shortcut starts, not a console program | 4 |
+| Licence | MIT | `LICENSE` |

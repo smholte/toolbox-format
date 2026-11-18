@@ -110,9 +110,11 @@ def test_broken_manifest(box, name):
     assert not rep.ok and any(expect in e for e in rep.errors), rep.text()
 
 
-def test_web_tool_needs_url_and_no_start(box):
-    edit(manifest(box, PLANNER), lambda d: d.pop("url"))
-    assert any("a web tool needs its url" in e for e in check(box).errors)
+def test_web_tool_may_leave_out_its_url_but_has_no_start(box):
+    edit(manifest(box, PLANNER), lambda d: d.pop("url"))                  # a tool with no address on the web
+    assert check(box).items == []
+    edit(manifest(box, PLANNER), lambda d: d.update(url="http://example.com/"))
+    assert not check(box).ok
     edit(manifest(box, PLANNER), lambda d: d.update(url="https://example.com/", start={"program": "C:/x.exe"}))
     assert any("a web tool has no start" in e for e in check(box).errors)
 

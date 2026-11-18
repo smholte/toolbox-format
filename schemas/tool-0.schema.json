@@ -155,5 +155,5 @@
       "uniqueItems": true
     }
   },
-  "description": "Checked beyond this schema by tbf/check.py: a web tool needs url and has no start, a native tool has no url; ids of actions and types are unique; every type named exists."
+  "description": "Checked beyond this schema by tbf/check.py: a web tool has no start, a native tool has no url; ids of actions and types are unique; every type named exists."
 }

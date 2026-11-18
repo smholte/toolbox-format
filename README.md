@@ -38,6 +38,8 @@ get a result back – and whether the browser still knows the folder the next da
 
 1. Open **https://smholte.github.io/toolbox-format/trial/** in Chrome or Edge.
 2. Follow the four numbered boxes on the page. For box 2 the page opens a second tab that plays Fresing Render.
+   The first time you make an empty folder `Toolbox` in your user folder and tell the page to set it up (later
+   Fresing Render makes that folder).
 3. Press **Copy the report** and keep the text.
 
 The page works on made-up files only, and only inside the folder you pick. **Remove the trial tools from the
@@ -57,5 +59,11 @@ code is 1 when there is an error. Python 3.11 or newer.
 
 ## Versions
 
-**0.1 is a draft**: not reviewed yet, no tag. Until 1.0 anything may change, and a tool reads only the version it
-was written for. How the format is changed: [`CLAUDE.md`](CLAUDE.md).
+**0.1** was reviewed by the leads of House Planner and Fresing Render on 18 Nov 2026 and is tagged `v0.1`. Tools pin
+a tag and test against its samples. Until 1.0 anything may change between versions, and a tool reads only the version
+it was written for. How the format is changed: [`CLAUDE.md`](CLAUDE.md).
+
+## Licence
+
+MIT, © 2026 Fresing – see [`LICENSE`](LICENSE). Code from here may be copied into other tools, also into ones under
+the GPL; keep the copyright line with it.
