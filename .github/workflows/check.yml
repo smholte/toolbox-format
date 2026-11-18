@@ -24,5 +24,5 @@ jobs:
         run: python tools/make_samples.py --check
       - name: The samples and the type list pass the checker
         run: python check.py samples/Toolbox types.json
-      - name: Tests (the checker on the samples and on broken copies)
+      - name: Tests (the checker and the folder code on the samples and on broken copies; the JavaScript in the machine's Chrome)
         run: python -m pytest -q tests

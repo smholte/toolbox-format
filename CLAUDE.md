@@ -17,7 +17,12 @@ First users: **House Planner** (`smholte/house-planner` public, `smholte/house-p
   tests (a new rule gets a broken-copy test), and `CHANGELOG.md`. `tbf/names.py` `VERSION` follows the format's.
 - **Public and made up only.** No real house, machine, customer, path of a real PC or person. Samples come only from
   `tools/make_samples.py`. Workers here never attach `house-planner-dev`.
-- Plain Python 3.10+ and PyPI (`requirements.txt`); no Blender, no Node in this repository's tests.
+- Plain Python 3.11+ and PyPI (`requirements.txt`); no Blender, no Node in this repository's tests. The JavaScript
+  (`web/toolbox-folder.js`, `trial/`) is one plain file without a build step and is tested in a real Chrome through
+  Playwright for Python (`tests/test_web.py`), with the browser's private file system standing in for a picked folder.
+- **Two copies must stay equal:** the type list (`types.json` and the `TYPES` block in `web/toolbox-folder.js`) and
+  every rule both languages judge (names, times, patterns, rules, reading a zip, checking a job). A change to one
+  side changes the other in the same commit; `tests/test_web.py` compares them case by case.
 - The format must be writable by a web page (File System Access API), a Blender extension and a small program
   alike. A rule one of them cannot follow is a wrong rule.
 - Owner: Sebastian – not a programmer. Plain language, short, results first, no code unless he asks.
@@ -27,7 +32,7 @@ First users: **House Planner** (`smholte/house-planner` public, `smholte/house-p
 ```bash
 python3 tools/make_samples.py --check          # samples/ up to date
 python3 check.py samples/Toolbox types.json    # samples valid
-python3 -m pytest -q tests                     # the checker on the samples and on broken copies
+python3 -m pytest -q tests                     # the checker, the folder code, and the JavaScript in Chrome
 ```
 
 GitHub runs the same at every push (`.github/workflows/check.yml`).
@@ -41,6 +46,13 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   and up as `?`, so JavaScript and Python see the same text.
 - Python's `$` also matches before a final line break and JavaScript's does not; `(?…)` groups and `\b`-style escapes
   differ too. Patterns in rules are held to a small common part (FORMAT.md 5.2) and the checker refuses the rest.
+- Python's `zipfile` and a hand-written reader disagree on damaged zips (which end record counts, bytes after the
+  end, entry counts). Both sides now follow the same few written steps (FORMAT.md 5.2) instead of a library; several
+  hundred damaged copies get the same answer in both.
+- More places where the two languages differ, all now ruled out or pinned: a bare `.` (JavaScript's skips `\r`),
+  `\s` on control characters (Python needs `re.ASCII`), `{,3}` (a count in Python, plain text in JavaScript), `a*+`
+  (possessive in Python 3.11+, an error in JavaScript), and a time offset `+01:60` (Python reads it).
+- Chrome's permission for a folder belongs to the site (`https://smholte.github.io`), not to one page under it.
 - STEP and IFC files both start with `ISO-10303-21;` – only the `FILE_SCHEMA` line tells them apart.
 - JSON-schema messages for "if this then not that" are unreadable; such rules are checked in `tbf/check.py` with a
   plain sentence instead.

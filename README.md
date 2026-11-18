@@ -23,10 +23,25 @@ drop popup and routes, then a toolbox window. All three read the same folder.
 | JSON schemas of every file | [`schemas/`](schemas/) |
 | A made-up Toolbox folder and small sample files | [`samples/`](samples/) – made by `tools/make_samples.py` |
 | The checker | `python3 check.py <Toolbox folder / toolbox.json / job folder>` |
-| Reference code (names, file types, the checker) | [`tbf/`](tbf/) |
+| Code a web tool can copy: connect the folder, send, read the inbox | [`web/toolbox-folder.js`](web/toolbox-folder.js) |
+| Code a native tool can copy: the same in Python | [`tbf/folder.py`](tbf/folder.py) (with `names.py`, `detect.py`) |
+| A trial page to try it on a real PC | [`trial/`](trial/) – see below |
+| A stand-in program for the receiving side | `python3 tools/standin.py` |
 | What changed | [`CHANGELOG.md`](CHANGELOG.md) |
 
 Everything here is **public and made up**.
+
+## Try it on your PC (no install)
+
+The trial page checks, in your own Chrome or Edge, that a page can hand a file over through the Toolbox folder and
+get a result back – and whether the browser still knows the folder the next day.
+
+1. Open **https://smholte.github.io/toolbox-format/trial/** in Chrome or Edge.
+2. Follow the four numbered boxes on the page. For box 2 the page opens a second tab that plays Fresing Render.
+3. Press **Copy the report** and keep the text.
+
+The page works on made-up files only, and only inside the folder you pick. **Remove the trial tools from the
+folder** on the page takes its two test tools out again.
 
 ## Use
 
@@ -34,11 +49,11 @@ Everything here is **public and made up**.
 python3 -m pip install -r requirements.txt
 python3 check.py samples/Toolbox types.json
 python3 check.py --type samples/files/*
-python3 -m pytest -q tests
+python3 -m pytest -q tests          # the tests of the JavaScript need Chrome on the machine
 ```
 
 `check.py` prints `OK` or a list of errors (a reader must refuse it) and warnings (readable, look at it); the exit
-code is 1 when there is an error.
+code is 1 when there is an error. Python 3.11 or newer.
 
 ## Versions
 

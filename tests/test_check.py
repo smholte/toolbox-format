@@ -348,12 +348,12 @@ def test_broken_zip_is_no_house_scene(tmp_path):
 
 
 @pytest.mark.parametrize("pattern", ["^ISO", "end$", "(?i)step", "(?=x)", "a\\bz", "\\x41", "[abc", "[]", "x" * 201,
-                                     "caf\u00e9", "a\\", ""])
+                                     "caf\u00e9", "a\\", "", "a.b", "a{,3}", "a{x}", "a*+", "a++", "a{2}+", "a**"])
 def test_patterns_that_are_refused(pattern):
     assert pattern_problem(pattern)
 
 
-@pytest.mark.parametrize("pattern", ["FILE_SCHEMA\\s*\\(\\s*\\(\\s*'IFC", "[^a-z]+\\d{2,4}", "a|b", "\\$\\^", "[$^]x"])
+@pytest.mark.parametrize("pattern", ["FILE_SCHEMA\\s*\\(\\s*\\(\\s*'IFC", "[^a-z]+\\d{2,4}", "a|b", "\\$\\^", "[$^.{]x", "a\\.b", "a{2}", "a{2,}?", "a+?b*?c??", "x}"])
 def test_patterns_that_are_fine(pattern):
     assert pattern_problem(pattern) is None
 

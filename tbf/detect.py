@@ -6,7 +6,8 @@ Written to be copied: the same steps in JavaScript give the same answer (section
 from __future__ import annotations
 
 import re
-import zipfile
+import struct
+import zlib
 from pathlib import Path
 
 from .names import EXT, TYPE_ID, JsonError, extension, is_dotted_type, load_json
@@ -28,9 +29,10 @@ def pattern_problem(p) -> str | None:
         return f"is longer than {MAX_PATTERN} characters"
     if any(ord(c) < 32 or ord(c) > 126 for c in p):
         return "holds a character outside plain ASCII"
-    i, in_class = 0, False
+    i, in_class, counted = 0, False, False       # counted: the last thing was a count (* + ? {n,m})
     while i < len(p):
         c = p[i]
+        was, counted = counted, False
         if c == "\\":
             nxt = p[i + 1:i + 2]
             if not nxt:
@@ -49,13 +51,27 @@ def pattern_problem(p) -> str | None:
                 return "has an empty [] group"
         elif c in "^$":
             return f"uses {c} (say where the file starts with starts_with instead)"
+        elif c == ".":
+            return "uses a bare . (it means different things in JavaScript and Python; write a set like [^\\n])"
         elif c == "(" and p[i + 1:i + 2] == "?":
             return "uses a (?…) group"
+        elif c == "{":
+            m = re.match(r"\{\d+(,\d*)?\}", p[i:])
+            if not m:
+                return "has a { that is not a count like {2}, {2,} or {2,5}"
+            i += m.end() - 1
+            counted = True
+        elif c in "*+":
+            if was:
+                return f"has {c} right after another count"
+            counted = True
+        elif c == "?":
+            counted = not was                   # a ? after a count makes it lazy; it is not a count itself
         i += 1
     if in_class:
         return "has a [ that is never closed"
     try:
-        re.compile(p)
+        re.compile(p, re.ASCII)
     except re.error as e:
         return f"is not a pattern ({e})"
     return None
@@ -135,6 +151,112 @@ def load_types(path: Path | str | None = None) -> list[dict]:
     return doc["types"]
 
 
+# ---------------------------------------------------------------- reading a zip (section 5.2, "A zip is read like this")
+ZIP_TAIL = 65557             # an end record and the longest comment
+ZIP_DIR_MAX = 64 * 2**20
+
+
+def _u16(b, o):
+    return struct.unpack_from("<H", b, o)[0]
+
+
+def _u32(b, o):
+    return struct.unpack_from("<I", b, o)[0]
+
+
+def _u64(b, o):
+    return struct.unpack_from("<Q", b, o)[0]
+
+
+def zip_index(fh, size: int) -> dict[str, dict] | None:
+    """the list of a zip: name -> entry, or None when the file is not a zip these steps can read"""
+    try:
+        tail_len = min(size, ZIP_TAIL)
+        fh.seek(size - tail_len)
+        tail = fh.read(tail_len)
+        e = tail.rfind(b"PK\x05\x06", 0, max(len(tail) - 22, -1) + 4)
+        if e < 0:
+            return None
+        pos = size - tail_len + e
+        count, cd_size, cd_off, shift = _u16(tail, e + 10), _u32(tail, e + 12), _u32(tail, e + 16), 0
+        if count == 0xFFFF or cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF:
+            loc = e - 20
+            if loc < 0 or tail[loc:loc + 4] != b"PK\x06\x07":
+                return None
+            fh.seek(_u64(tail, loc + 8))
+            r = fh.read(56)
+            if len(r) < 56 or r[:4] != b"PK\x06\x06":
+                return None
+            count, cd_size, cd_off = _u64(r, 32), _u64(r, 40), _u64(r, 48)
+        else:
+            shift = pos - cd_size - cd_off          # bytes put in front of the zip
+            if shift < 0:
+                return None
+            cd_off += shift
+        if cd_off + cd_size > size or cd_size > ZIP_DIR_MAX:
+            return None
+        fh.seek(cd_off)
+        cd = fh.read(cd_size)
+        out, p = {}, 0
+        for _ in range(count):
+            if p + 46 > len(cd) or cd[p:p + 4] != b"PK\x01\x02":
+                return None
+            flags, name_len, extra_len, comment_len = _u16(cd, p + 8), _u16(cd, p + 28), _u16(cd, p + 30), _u16(cd, p + 32)
+            ent = {"flags": flags, "method": _u16(cd, p + 10), "crc": _u32(cd, p + 16), "csize": _u32(cd, p + 20),
+                   "usize": _u32(cd, p + 24), "offset": _u32(cd, p + 42) + shift}
+            if p + 46 + name_len + extra_len + comment_len > len(cd):
+                return None
+            raw = cd[p + 46:p + 46 + name_len]
+            name = raw.decode("utf-8", "replace") if flags & 0x800 else raw.decode("latin-1")
+            x, end = p + 46 + name_len, p + 46 + name_len + extra_len
+            while x + 4 <= end:                     # zip64 sizes
+                ident, length = _u16(cd, x), _u16(cd, x + 2)
+                if ident == 1:
+                    q = x + 4
+                    if ent["usize"] == 0xFFFFFFFF:
+                        ent["usize"] = _u64(cd, q)
+                        q += 8
+                    if ent["csize"] == 0xFFFFFFFF:
+                        ent["csize"] = _u64(cd, q)
+                        q += 8
+                    if ent["offset"] == 0xFFFFFFFF + shift:
+                        ent["offset"] = _u64(cd, q) + shift
+                x += 4 + length
+            out[name] = ent
+            p += 46 + name_len + extra_len + comment_len
+        return out
+    except (struct.error, OSError, OverflowError, ValueError):
+        return None
+
+
+def zip_read(fh, size: int, ent: dict) -> bytes | None:
+    """the bytes of one entry (stored or deflated, not encrypted, CRC checked), or None"""
+    try:
+        if ent["flags"] & 1 or ent["method"] not in (0, 8):
+            return None
+        fh.seek(ent["offset"])
+        h = fh.read(30)
+        if len(h) < 30 or h[:4] != b"PK\x03\x04":
+            return None
+        start = ent["offset"] + 30 + _u16(h, 26) + _u16(h, 28)
+        if start + ent["csize"] > size:
+            return None
+        fh.seek(start)
+        packed = fh.read(ent["csize"])
+        if len(packed) != ent["csize"]:
+            return None
+        if ent["method"] == 0:
+            data = packed
+        else:
+            d = zlib.decompressobj(-15)
+            data = d.decompress(packed, ent["usize"] + 1)
+            if len(data) > ent["usize"] or not d.eof or d.unused_data or d.unconsumed_tail:
+                return None
+        return data if len(data) == ent["usize"] and zlib.crc32(data) == ent["crc"] else None
+    except (struct.error, OSError, OverflowError, ValueError, zlib.error, MemoryError):
+        return None
+
+
 # ---------------------------------------------------------------- looking at a file
 class Sniff:
     """what the rules may see of one file: its first bytes, and when it is a zip, its list of names"""
@@ -161,20 +283,21 @@ class Sniff:
     def names(self) -> dict | None:
         if self._zip is False:
             try:
-                with zipfile.ZipFile(self.path) as z:
-                    self._zip = {i.filename: i.file_size for i in z.infolist()}
-            except (zipfile.BadZipFile, OSError, ValueError, NotImplementedError):
+                with open(self.path, "rb") as fh:
+                    self._zip = zip_index(fh, self.path.stat().st_size)
+            except OSError:
                 self._zip = None
         return self._zip
 
     def zip_json(self, name: str):
-        sizes = self.names()
-        if not sizes or name not in sizes or sizes[name] > ZIP_JSON_MAX:
+        entries = self.names()
+        if not entries or name not in entries or entries[name]["usize"] > ZIP_JSON_MAX:
             return None
         try:
-            with zipfile.ZipFile(self.path) as z:
-                return load_json(z.read(name))
-        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, NotImplementedError, JsonError, KeyError):
+            with open(self.path, "rb") as fh:
+                data = zip_read(fh, self.path.stat().st_size, entries[name])
+            return None if data is None else load_json(data)
+        except (OSError, JsonError):
             return None
 
 
@@ -191,7 +314,7 @@ def matches(rule: dict, f: Sniff) -> bool:
     if key == "starts_with_hex":
         return f.starts_with(bytes.fromhex(v), skip=False)
     if key == "head_matches":
-        return re.search(v, f.text) is not None
+        return re.search(v, f.text, re.ASCII) is not None
     if key == "zip_has":
         return v["file"] in (f.names() or {})
     if key == "zip_json":

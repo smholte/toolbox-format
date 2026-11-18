@@ -112,10 +112,11 @@ Files lie directly in the job folder; folders inside a job are not part of 0.1.
 
 Every JSON file of this format: UTF-8 without a byte-order mark, one object, at most 1 MiB, no key twice, no `NaN`
 or `Infinity`, and no control characters (line breaks, tabs …) in any text or key – so JavaScript and Python read the
-same thing. Each starts with `"format"` (which file it is) and `"version"`. Unknown fields are an error in 0.x.
+same thing. (JavaScript cannot see a key written twice – its last one wins – so a writer MUST NOT write one, and the
+checker refuses it.) Each starts with `"format"` (which file it is) and `"version"`. Unknown fields are an error in 0.x.
 
 Times are written `2026-11-18T19:51:00+01:00`: date, `T`, clock time to the second (thousandths MAY follow), and
-the offset from UTC or `Z`.
+the offset from UTC (`+00:00` to `+23:59`, or `-`) or `Z`.
 
 ### 3.5 Versions
 
@@ -203,13 +204,24 @@ rules, at the zip's list of files and one JSON file in it.
 | `{"zip_json": {"file": "scene.json", "field": "format", "equals": "house-scene"}}` | … and that file (at most 1 MiB) is JSON as in 3.4 whose top-level `field` is exactly this text |
 | `{"all": [rule, …]}` · `{"any": [rule, …]}` · `{"not": rule}` | all / at least one / not – at most 4 deep |
 
+**A zip is read like this** (the same few steps everywhere, so every tool gives the same answer – also for a
+damaged file): take the last end-of-central-directory record that starts in the file's final 65 557 bytes (its
+zip64 form when the record says so); read the central directory it names, entry by entry, as many as it counts;
+bytes in front of the zip shift every offset; of two entries with one name the later counts. One entry is read from
+where its local header says the data starts, stored or deflated, not encrypted, and only when its length and
+CRC-32 are what the directory says. Anything that does not fit is "not a zip" or "no such file" – never an error.
+`tbf/detect.py` and `web/toolbox-folder.js` are these steps in Python and JavaScript.
+
 **The head as text**: every byte below 0x80 is its ASCII character, every other byte reads as `?`. (Do not use a
 browser's `latin1` decoder: it is Windows-1252 and changes bytes 0x80–0x9F.)
 
 **Patterns** MUST mean the same in JavaScript and Python, so only this is allowed: plain ASCII, at most 200
-characters; `\s \S \d \D \w \W`; a backslash before a sign (`\(`, `\.`); groups `( )`, choices `|`, sets `[ ]` and
-`[^ ]`, and the counts `* + ? {n,m}`. Not allowed: `^` and `$` outside a set (use `starts_with`), any `(?…)` group,
-and a backslash before any other letter or digit. Patterns are case-sensitive.
+characters; `\s \S \d \D \w \W` (ASCII meaning); a backslash before a sign (`\(`, `\.`); groups `( )`, choices `|`,
+sets `[ ]` and `[^ ]`, the counts `* + ?` and `{n}`, `{n,}`, `{n,m}`, and a `?` after a count (as few as possible).
+Not allowed: `^` and `$` outside a set (use `starts_with`), a bare `.` (it skips different line ends in the two
+languages – write a set), any `(?…)` group, a backslash before any other letter or digit, a `{` that is not a
+count, and `+` or `*` straight after another count. Patterns are case-sensitive. In Python they are used with
+`re.ASCII`, in JavaScript without flags.
 
 ### 5.3 Which type a file is
 
@@ -372,6 +384,9 @@ A page cannot reach a folder by itself. What works today, checked 18 Nov 2026:
   `Windows`, `~/Library` and others, with everything inside them; folders *inside* the home folder are fine
   ([the list in Chromium](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/file_system_access/chrome_file_system_access_permission_context.cc)).
   That is why the folder is `C:\Users\<name>\Toolbox` (section 2).
+- **Chrome gives the folder to a site, not to one page.** A site is the address up to the first slash:
+  `https://smholte.github.io/house-planner/` and every other page under `https://smholte.github.io` are one site
+  and share the permission and the kept folder. Put only pages you trust under the same address as a tool.
 - The page SHOULD check that the picked folder holds `toolbox-folder.json` (or is empty and named `Toolbox`, then it
   makes the file) and say so plainly when it is another folder.
 - A page reads and writes only while it is open, and a tab in the background is slowed down by the browser. A reply
@@ -410,6 +425,16 @@ python3 check.py --type some-file           which type a file is
 
 ERROR = a reader must refuse it; WARNING = readable, look at it. A tool's own tests SHOULD run its manifest and the
 jobs it writes through the checker.
+
+**Reference code to copy.** `web/toolbox-folder.js` for a web tool (one plain file) and `tbf/folder.py` with
+`tbf/names.py` and `tbf/detect.py` for a native tool do everything of sections 5 to 7: connect the folder, send,
+read the inbox, check a job, answer. `tests/test_web.py` runs the JavaScript in Chrome against the Python: both
+name every sample file – and several hundred damaged copies – the same type, refuse the same bad jobs with the
+same code, and read each other's jobs.
+
+**The trial** (`trial/index.html`) is a page with two sides, one playing House Planner and one playing Fresing
+Render, for trying the folder on a real PC before any app is changed. `tools/standin.py` plays the receiving side
+as a program.
 
 ## 12. Not in 0.1
 

@@ -13,7 +13,7 @@ JOB_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
 TYPE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 ACTION_ID = TYPE_ID
 EXT = re.compile(r"\.[a-z0-9]{1,16}")
-TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})")
+TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)")
 
 JOB_FILES = ("job.json", "status.json", "cancel.json")          # the format's own files in a job folder
 _WINDOWS = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}

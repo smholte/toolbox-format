@@ -1,3 +1,5 @@
-# check.py needs only jsonschema; the tests need pytest. Plain Python 3.10+ otherwise.
+# check.py needs only jsonschema; the tests need pytest, and playwright (with a Chrome on the machine) for the
+# JavaScript. Plain Python 3.11+ otherwise.
 jsonschema==4.26.0
 pytest==9.2.0
+playwright==1.63.0

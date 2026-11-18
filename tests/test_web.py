@@ -1,0 +1,387 @@
+"""web/toolbox-folder.js in a real Chrome: what it writes passes the checker, it reads what Python writes, and it
+names file types exactly as tbf/detect.py does. The Toolbox folder is a folder in the browser's private file
+system – the same kind of handle the folder picker gives. Needs `playwright` and an installed Chrome."""
+from __future__ import annotations
+
+import base64
+import functools
+import http.server
+import json
+import random
+import re
+import shutil
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from tbf import folder as F  # noqa: E402
+from tbf.check import check  # noqa: E402
+from tbf.detect import detect, load_types, pattern_problem, rule_problems  # noqa: E402
+from tbf.names import name_problem, time_problem  # noqa: E402
+
+sync_api = pytest.importorskip("playwright.sync_api")
+SAMPLES = ROOT / "samples"
+RENDER, PLANNER = "nl.fresing.render", "nl.fresing.house-planner"
+JOB1 = "20261118-195100-9f3c2a"
+
+
+class Quiet(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture(scope="module")
+def page():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(ROOT)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    with sync_api.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(channel="chrome")
+        except Exception:
+            exe = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+            if not exe:
+                pytest.skip("no Chrome on this machine")
+            browser = p.chromium.launch(executable_path=exe)
+        pg = browser.new_context().new_page()
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(f"http://localhost:{server.server_address[1]}/tests/web_harness.html")
+        assert pg.evaluate("typeof ToolboxFolder") == "object", errors
+        yield pg
+        browser.close()
+    server.shutdown()
+    assert not errors, errors
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def tree_of(folder: Path) -> dict[str, str]:
+    return {p.relative_to(folder).as_posix(): b64(p.read_bytes()) for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+def write_tree(tree: dict[str, str], folder: Path):
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir(parents=True)
+    for path, data in tree.items():
+        p = folder / path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(base64.b64decode(data))
+
+
+def manifests_only() -> dict[str, str]:
+    """the sample folder with its two tools and no jobs"""
+    return {k: v for k, v in tree_of(SAMPLES / "Toolbox").items() if "/inbox/" not in k and not k.endswith("alive.json")}
+
+
+def dump_and_check(page, tmp_path, name="Toolbox") -> Path:
+    out = tmp_path / name
+    write_tree(page.evaluate("harness.dump()"), out)
+    rep = check(out)
+    assert rep.items == [], rep.text()
+    return out
+
+
+# ---------------------------------------------------------------- the copies agree
+def test_types_in_the_js_file_are_types_json():
+    js = (ROOT / "web" / "toolbox-folder.js").read_text("utf-8")
+    block = js[js.index("/* TYPES-BEGIN */"):js.index("/* TYPES-END */")]
+    listed = json.loads(block[block.index("["):block.rindex("]") + 1])
+    assert listed == json.loads((ROOT / "types.json").read_text("utf-8"))["types"]
+
+
+def test_version(page):
+    assert page.evaluate("ToolboxFolder.VERSION") == F.VERSION
+
+
+# ---------------------------------------------------------------- file types: JavaScript and Python say the same
+def variants() -> list[tuple[str, bytes]]:
+    rnd = random.Random(11)
+    base = {p.name: p.read_bytes() for p in sorted((SAMPLES / "files").iterdir())}
+    out = list(base.items())
+    names = ["a.step", "a.STP", "a.ifc", "a.hpscene", "a.hpbake", "a.zip", "a.glb", "a.pdf", "a", "a.b.csv", ".step",
+             "a.json", "a.unknownkind", "a.p21", "a.jpeg"]
+    for data in base.values():
+        for n in rnd.sample(names, 4):
+            out.append((n, data))
+    step = base["sample-part.step"]
+    out += [("bom.step", b"\xef\xbb\xbf \r\n\t" + step), ("space.stp", b"\n\n" + step), ("hi.step", step.replace(b"made-up", b"\xe5\xff\x80\x1c")),
+            ("ifc-late.step", step.replace(b"AUTOMOTIVE_DESIGN", b"IFC4X3")), ("empty.step", b""), ("empty", b""),
+            ("pdf.pdf", b"%PDF-1.7\n"), ("pdf.txt", b" %PDF-1.7\n"), ("png.png", bytes.fromhex("89504e470d0a1a0a") + b"x"),
+            ("jpg.jpg", b"\xff\xd8\xff\xe0"), ("empty.zip", b"PK\x05\x06" + b"\0" * 18), ("glb.step", base["sample-model.glb"])]
+    import io
+    import zipfile
+    for comp, name, doc in ((zipfile.ZIP_DEFLATED, "scene.json", b'{"format":"house-scene"}'),
+                            (zipfile.ZIP_STORED, "scene.json", b'{"format":"house-bake"}'),
+                            (zipfile.ZIP_DEFLATED, "bake.json", b'{"format":"house-bake","x":"' + b"y" * 5000 + b'"}'),
+                            (zipfile.ZIP_DEFLATED, "scene.json", b'{"format":"house-scene","format":"x"}'),
+                            (zipfile.ZIP_DEFLATED, "scene.json", b'["house-scene"]'),
+                            (zipfile.ZIP_DEFLATED, "scene.json", b'{"format":"house-scene","n":NaN}'),
+                            (zipfile.ZIP_DEFLATED, "sub/scene.json", b'{"format":"house-scene"}'),
+                            (zipfile.ZIP_DEFLATED, "scene.json", b'{"format":"house-scene","big":"' + b"z" * 2**20 + b'"}')):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", comp) as z:
+            z.writestr("other.txt", b"x" * 100)
+            z.writestr(name, doc)
+        out.append((f"made-{len(out)}.hpscene", buf.getvalue()))
+        out.append((f"made-{len(out)}.zip", buf.getvalue() + b"trailing"))
+    for name, data in list(base.items()):                     # damaged copies
+        for _ in range(150 if data[:2] == b"PK" else 25):
+            b = bytearray(data)
+            for _ in range(rnd.randint(1, 5)):
+                if b:
+                    b[rnd.randrange(len(b))] = rnd.randrange(256)
+            if rnd.random() < 0.3:
+                b = b[:rnd.randrange(len(b) + 1)]
+            out.append((name, bytes(b)))
+    return out
+
+
+def test_detect_type_is_the_same_in_javascript_and_python(page, tmp_path):
+    types = load_types()
+    cases = variants()
+    got = page.evaluate("""async cases => { const out = []; for (const [name, data] of cases) { const r = await ToolboxFolder.detectType(harness.file(name, data)); out.push([r.type, r.note]); } return out; }""",
+                        [[n, b64(d)] for n, d in cases])
+    differ = []
+    for i, ((name, data), js) in enumerate(zip(cases, got)):
+        p = tmp_path / f"{i}" / name
+        p.parent.mkdir()
+        p.write_bytes(data)
+        py = list(detect(p, types))
+        if py != js:
+            differ.append((i, name, py, js))
+    assert not differ, differ[:5]
+    assert len({t for t, _ in got}) >= 9          # the cases really cover many types
+
+
+def test_names_times_patterns_and_rules_are_judged_the_same(page):
+    names = ["", "a/b", "a\\b", "..", ".hidden", "trailing.", "trailing ", " leading", "con", "COM1.step", "a:b", "what?.step",
+             "x" * 121, "x" * 120, "tab\there", "job.json", "Status.JSON", "part.step", "Hus – versjon 3.hpscene",
+             "a.b.c.tar.gz", "console.step", "\U0001f3e0" * 120, "\U0001f3e0" * 121, "nul", "lpt9.txt", "a|b", 'a"b', "a*"]
+    times = ["2026-11-18T19:51:00+01:00", "2026-11-18T18:51:00Z", "2026-11-18T19:51:00.250+01:00", "2026-11-18 19:51:00",
+             "2026-11-18T19:51:00", "2026-13-01T00:00:00Z", "2026-02-30T10:00:00+01:00", "2024-02-29T10:00:00Z",
+             "2026-02-29T10:00:00Z", "2026-11-18T24:00:00Z", "2026-11-18T19:60:00Z", "2026-11-18T19:51:61Z",
+             "2026-11-18T19:51:00+24:00", "2026-11-18T19:51:00+01:60", "0000-01-01T00:00:00Z", "2026-11-18T19:51:00.1Z"]
+    patterns = ["^ISO", "end$", "(?i)step", "(?=x)", "a\\bz", "\\x41", "[abc", "[]", "x" * 201, "café", "a\\", "", "a.b",
+                "a{,3}", "a{x}", "a*+", "a++", "a{2}+", "a**", "FILE_SCHEMA\\s*\\(\\s*\\(\\s*'IFC", "[^a-z]+\\d{2,4}", "a|b",
+                "\\$\\^", "[$^.{]x", "a\\.b", "a{2}", "a{2,}?", "a+?b*?c??", "x}", "(a", "a)", "[^]", "a{2,1}", "+a", "a|*"]
+    rules = [{}, {"starts_with": "A", "starts_with_hex": "41"}, {"magic": "A"}, {"starts_with": "two words"},
+             {"starts_with_hex": "4G"}, {"starts_with_hex": "ABCD"}, {"all": []}, {"zip_has": {"file": "../x"}},
+             {"zip_json": {"file": "a.json", "field": "format"}}, {"not": {"not": {"not": {"not": {"starts_with": "A"}}}}},
+             {"not": {"any": [{"zip_has": {"file": "a/b.json"}}]}}, {"starts_with": "A"}, {"head_matches": "a.b"},
+             {"all": [{"any": [{"not": {"starts_with": "A"}}]}]}, {"zip_has": {"file": "a", "x": "y"}}, [], "x", {"all": "x"}]
+    js = page.evaluate("""([names, times, patterns, rules]) => [names.map(n => ToolboxFolder.nameProblem(n) === null),
+        times.map(t => ToolboxFolder.timeProblem(t) === null), patterns.map(p => ToolboxFolder.patternProblem(p) === null),
+        rules.map(r => ToolboxFolder.ruleProblem(r) === null)]""", [names, times, patterns, rules])
+    assert js[0] == [name_problem(n) is None for n in names]
+    assert js[1] == [time_problem(t) is None for t in times]
+    assert js[2] == [pattern_problem(p) is None for p in patterns]
+    assert js[3] == [rule_problems(r, "") == [] for r in rules]
+
+
+# ---------------------------------------------------------------- a round trip, all in the browser
+SEND = """async ([me, to, name, data]) => { const box = await harness.box(me);
+  return box.send({ to, action: 'bake-house', files: [harness.file(name, data)], ret: 'import-bake', title: 'Sample house – version 3' }); }"""
+
+
+def test_round_trip_in_the_browser(page, tmp_path):
+    page.evaluate("t => harness.load(t)", manifests_only())
+    scene = (SAMPLES / "files" / "sample-house.hpscene").read_bytes()
+    bake = (SAMPLES / "files" / "sample-house.hpbake").read_bytes()
+    job = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", b64(scene)])
+    out = dump_and_check(page, tmp_path)
+    assert json.loads((out / "tools" / RENDER / "inbox" / job / "job.json").read_text("utf-8"))["files"] == [
+        {"name": "sample-house.hpscene", "type": "hpscene", "size": len(scene)}]
+    assert page.evaluate("async ([me, to, job]) => (await (await harness.box(me)).status(to, job)).state", [PLANNER, RENDER, job]) == "sent"
+    reply = page.evaluate("""async ([me, bake]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      await box.alive('0.0.0-test');
+      const [id] = await box.pending(); const { job, files } = await box.take(m, id);
+      await box.writeStatus(id, 'working', { fraction: 0.5, text: 'Halfway ' + files[0].type });
+      return box.sendReply(job, [harness.file('sample-house.hpbake', bake)], 'Baked'); }""", [RENDER, b64(bake)])
+    dump_and_check(page, tmp_path)
+    st = page.evaluate("async ([me, to, job]) => { const box = await harness.box(me); return [await box.status(to, job), (await box.tool(to)).open]; }", [PLANNER, RENDER, job])
+    assert st[0]["state"] == "done" and st[0]["reply"] == reply and st[1] is True
+    got = page.evaluate("""async ([me, to, sent]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      const [id] = await box.pending(); const { job, files } = await box.take(m, id);
+      const size = files[0].file.size; await box.remove(me, id); await box.remove(to, sent);
+      return [job.action, job.reply_to.job, files[0].type, size, await box.pending(), await box.status(to, sent)]; }""", [PLANNER, RENDER, job])
+    assert got == ["import-bake", job, "hpbake", len(bake), [], None]
+    out = dump_and_check(page, tmp_path)
+    assert not list(out.glob("tools/*/inbox/*"))
+
+
+def test_cancel_and_a_job_that_is_refused_before_it_is_written(page, tmp_path):
+    page.evaluate("t => harness.load(t)", manifests_only())
+    scene = b64((SAMPLES / "files" / "sample-house.hpscene").read_bytes())
+    job = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", scene])
+    assert page.evaluate("""async ([me, to, job]) => { const a = await harness.box(me), b = await harness.box(to);
+      const before = await b.wantsCancel(job); await a.cancel(to, job); return [before, await b.wantsCancel(job)]; }""", [PLANNER, RENDER, job]) == [False, True]
+    dump_and_check(page, tmp_path)
+    step = b64((SAMPLES / "files" / "sample-part.step").read_bytes())
+    for args, code in (([PLANNER, RENDER, "part.hpscene", step], "wrong-type"), ([PLANNER, RENDER, "a/b.hpscene", scene], "bad-name"),
+                       ([PLANNER, "com.example.nobody", "x.hpscene", scene], "no-tool")):
+        r = page.evaluate(f"a => harness.tried(() => ({SEND})(a))", args)
+        assert r.get("code") == code, r
+    assert len(list(dump_and_check(page, tmp_path).glob("tools/*/inbox/*"))) == 1
+
+
+# ---------------------------------------------------------------- the browser and Python hand over to each other
+def test_browser_sends_python_answers_browser_takes_the_reply(page, tmp_path):
+    page.evaluate("t => harness.load(t)", manifests_only())
+    job = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", b64((SAMPLES / "files" / "sample-house.hpscene").read_bytes())])
+    box = dump_and_check(page, tmp_path)
+    me = F.read_tool(box, RENDER)
+    (folder,) = F.pending(box, RENDER)
+    doc, files = F.take(box, me, folder)
+    assert doc["job"] == job and files[0][1] == "hpscene"
+    reply = F.send_reply(box, me, doc, [SAMPLES / "files" / "sample-house.hpbake"], text="Baked")
+    assert check(box).items == []
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    got = page.evaluate("""async me => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      const [id] = await box.pending(); const { job, files } = await box.take(m, id); return [id, job.reply_to.job, files[0].type]; }""", PLANNER)
+    assert got == [reply, job, "hpbake"]
+
+
+def test_python_sends_browser_takes(page, tmp_path):
+    box = tmp_path / "Toolbox"
+    write_tree(manifests_only(), box)
+    job = F.send(box, RENDER, PLANNER, "import-bake", [SAMPLES / "files" / "sample-house.hpbake"], title="From Python")
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    got = page.evaluate("""async me => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      const [id] = await box.pending(); const { job, files } = await box.take(m, id); await box.writeStatus(id, 'done', { text: 'Imported' });
+      return [id, job.title, files[0].type]; }""", PLANNER)
+    assert got == [job, "From Python", "hpbake"]
+    out = dump_and_check(page, tmp_path, "back")
+    assert F.read_status(out, PLANNER, job)["state"] == "done"
+
+
+BAD_JOBS = {
+    "another version": lambda d: d.update(version="0.2"),
+    "unknown field": lambda d: d.update(priority=1),
+    "job is not the folder": lambda d: d.update(job="20261118-195100-000000"),
+    "for another tool": lambda d: d.update(to="nl.fresing.other"),
+    "unknown action": lambda d: d.update(action="polish"),
+    "to itself": lambda d: d.update({"from": RENDER}),
+    "bad time": lambda d: d.update(created="18 Nov 2026"),
+    "no files": lambda d: d.update(files=[]),
+    "file too large": lambda d: d["files"][0].update(size=5),
+    "file too short": lambda d: d["files"][0].update(size=10**6),
+    "wrong type": lambda d: d["files"][0].update(type="hpbake"),
+    "type the action does not accept": lambda d: d.update(action="import-step"),
+    "missing file": lambda d: d["files"][0].update(name="other.hpscene"),
+    "path in a name": lambda d: d["files"][0].update(name="../sample-house.hpscene"),
+    "listed twice": lambda d: d["files"].append(dict(d["files"][0], name="SAMPLE-HOUSE.hpscene")),
+    "not json": None,
+}
+
+
+@pytest.mark.parametrize("name", BAD_JOBS)
+def test_a_bad_job_gets_the_same_answer_from_javascript_and_python(page, tmp_path, name):
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    folder = box / "tools" / RENDER / "inbox" / JOB1
+    (folder / "status.json").unlink()
+    if BAD_JOBS[name] is None:
+        (folder / "job.json").write_bytes(b"{")
+    else:
+        doc = json.loads((folder / "job.json").read_text("utf-8"))
+        BAD_JOBS[name](doc)
+        (folder / "job.json").write_text(json.dumps(doc), "utf-8")
+    try:
+        F.take(box, F.read_tool(box, RENDER), folder)
+        py = "ok"
+    except F.JobProblem as p:
+        py = p.code
+    except FileNotFoundError:
+        py = "not-complete"
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    r = page.evaluate("""async ([me, id]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      return harness.tried(() => box.take(m, id).then(() => 'ok')); }""", [RENDER, JOB1])
+    js = r.get("code") or r.get("ok")
+    assert py == js and py != "ok", (py, r)
+
+
+# ---------------------------------------------------------------- the folder itself
+def test_a_folder_that_is_not_the_toolbox_folder(page):
+    page.evaluate("harness.load({'notes.txt': 'eA=='})")
+    r = page.evaluate("harness.tried(async () => { await harness.box('nl.fresing.house-planner'); })")
+    assert r.get("code") == "not-toolbox", r
+    page.evaluate("t => harness.load(t)", {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.2"}')})
+    r = page.evaluate("harness.tried(async () => { await harness.box('nl.fresing.house-planner'); })")
+    assert r.get("code") == "version", r
+
+
+def test_an_empty_folder_becomes_the_toolbox_folder_and_a_manifest_is_written(page, tmp_path):
+    page.evaluate("harness.load({})")
+    manifest = json.loads((SAMPLES / "Toolbox" / "tools" / PLANNER / "toolbox.json").read_text("utf-8"))
+    page.evaluate("async m => { const box = await harness.box(m.id); await box.writeManifest(m); await box.alive(); await box.notAlive(); await box.notAlive(); }", manifest)
+    out = dump_and_check(page, tmp_path)
+    assert json.loads((out / "tools" / PLANNER / "toolbox.json").read_text("utf-8")) == manifest
+    r = page.evaluate("m => harness.tried(async () => { const box = await harness.box(m.id); await box.writeManifest({ ...m, kind: 'native' }); })", manifest)
+    assert r.get("code") == "json", r
+
+
+def test_a_broken_or_newer_manifest_of_another_tool(page):
+    tree = manifests_only()
+    key = f"tools/{RENDER}/toolbox.json"
+    doc = json.loads(base64.b64decode(tree[key]))
+    for change, code in ((lambda d: d.update(version="0.2"), "version"), (lambda d: d.update(colour="red"), "json"),
+                         (lambda d: d["actions"][0].update(accepts=["stepp"]), "json")):
+        d = json.loads(json.dumps(doc))
+        change(d)
+        page.evaluate("t => harness.load(t)", {**tree, key: b64(json.dumps(d).encode())})
+        r = page.evaluate("async ([me, to]) => harness.tried(async () => { await (await harness.box(me)).tool(to); })", [PLANNER, RENDER])
+        assert r.get("code") == code, r
+        assert page.evaluate("async me => (await (await harness.box(me)).all()).map(t => t.manifest.id)", PLANNER) == [PLANNER]
+
+
+# ---------------------------------------------------------------- the trial page (trial/index.html)
+DUMP = """async () => { const out = {}; const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192)); return btoa(s); };
+  const walk = async (dir, pre) => { for await (const [name, h] of dir.entries()) { if (h.kind === 'directory') await walk(h, pre + name + '/'); else out[pre + name] = b64(new Uint8Array(await (await h.getFile()).arrayBuffer())); } };
+  await walk(await (await navigator.storage.getDirectory()).getDirectoryHandle('Toolbox'), ''); return out; }"""
+
+
+def test_the_trial_page_does_a_round_trip(page, tmp_path):
+    base = page.url.rsplit("/tests/", 1)[0] + "/trial/index.html"
+    page.evaluate("harness.reset()")
+    ctx = page.context
+    receiver, sender = ctx.new_page(), ctx.new_page()
+    errors = []
+    for pg in (receiver, sender):
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+    try:
+        receiver.goto(base + "?role=receiver&opfs=1&bake=2")
+        receiver.wait_for_function("document.getElementById('folderState').textContent.startsWith('Connected')")
+        receiver.click("#watch")
+        sender.goto(base + "?role=sender&opfs=1")
+        sender.wait_for_function("document.getElementById('peerState').textContent.includes('open and watching')", timeout=15000)
+        sender.click("#send")
+        sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('The bake came back')", timeout=30000)
+        assert "checked as hpbake" in sender.inner_text("#sendState")
+        report = sender.input_value("#report")
+        assert "Round trip" in report and "ERROR" not in report, report
+        assert "bake sent back as job" in receiver.input_value("#report")
+        out = tmp_path / "Toolbox"
+        write_tree(sender.evaluate(DUMP), out)
+        rep = check(out)
+        assert rep.items == [], rep.text()
+        assert not list(out.glob("tools/*/inbox/*")), "both jobs are cleaned up"
+        # a job sent while the stand-in bakes can be cancelled
+        sender.click("#send")
+        sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Baking moment')", timeout=15000)
+        sender.click("#cancel")
+        sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Cancelled')", timeout=15000)
+        # after a reload the folder is still known
+        sender.reload()
+        sender.wait_for_function("document.getElementById('memoryState').textContent.startsWith('Chrome remembered the folder and the permission')")
+    finally:
+        receiver.close()
+        sender.close()
+    assert not errors, errors

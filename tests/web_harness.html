@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>toolbox-folder.js test page</title>
+<script src="../web/toolbox-folder.js"></script>
+<script>
+/* Helpers for tests/test_web.py. The Toolbox folder is a folder "Toolbox" in the browser's private file system:
+   the same kind of handle the folder picker gives, without a picker. */
+const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192)); return btoa(s); };
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const harness = {
+  async root(create = true) { return (await navigator.storage.getDirectory()).getDirectoryHandle('Toolbox', { create }); },
+  async reset() { const top = await navigator.storage.getDirectory(); for await (const [name] of top.entries()) await top.removeEntry(name, { recursive: true }); },
+  async load(tree) {
+    await this.reset();
+    const root = await this.root();
+    for (const [path, data] of Object.entries(tree)) {
+      const parts = path.split('/'); let dir = root;
+      for (const p of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(p, { create: true });
+      const w = await (await dir.getFileHandle(parts.at(-1), { create: true })).createWritable();
+      await w.write(unb64(data)); await w.close();
+    }
+  },
+  async dump() {
+    const out = {};
+    const walk = async (dir, pre) => { for await (const [name, h] of dir.entries()) { if (h.kind === 'directory') await walk(h, pre + name + '/'); else out[pre + name] = b64(new Uint8Array(await (await h.getFile()).arrayBuffer())); } };
+    await walk(await this.root(), '');
+    return out;
+  },
+  async box(me) { return ToolboxFolder.open(await this.root(), me, 'any'); },
+  file(name, data) { return new File([unb64(data)], name); },
+  /** run fn; give { ok } or { code, message } of the TbError */
+  async tried(fn) { try { return { ok: await fn() ?? null }; } catch (e) { if (e instanceof ToolboxFolder.TbError) return { code: e.code, message: e.message }; throw e; } },
+};
+</script>

@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toolbox trial</title>
+<style>
+  :root { --ink: #1b1f24; --quiet: #5b6570; --line: #d7dce2; --bg: #f5f6f8; --card: #fff; --accent: #0b5cad; --good: #1a7f4b; --bad: #b3261e; --warn: #9a6200; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e8eaed; --quiet: #a3acb6; --line: #3a4048; --bg: #15181c; --card: #1e2227; --accent: #6db3f2; --good: #5fd08f; --bad: #ff8a80; --warn: #f2c063; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 0 0 8px; }
+  p { margin: 0 0 10px; }
+  .lead { color: var(--quiet); margin-bottom: 20px; }
+  .roles { display: flex; gap: 8px; margin: 0 0 20px; flex-wrap: wrap; }
+  .roles a { padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; color: var(--ink); background: var(--card); }
+  .roles a.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+  section.off { opacity: .5; }
+  .n { display: inline-block; width: 26px; height: 26px; line-height: 26px; text-align: center; border-radius: 50%; background: var(--accent); color: var(--card); font-weight: 700; font-size: 14px; margin-right: 8px; }
+  button { font: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  @media (prefers-color-scheme: dark) { button { color: #0d1117; } }
+  button.plain { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button + button { margin-left: 8px; }
+  select { font: inherit; padding: 7px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  .state { margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--bg); border-left: 4px solid var(--line); overflow-wrap: anywhere; }
+  .state.good { border-left-color: var(--good); } .state.bad { border-left-color: var(--bad); } .state.warn { border-left-color: var(--warn); }
+  .bar { height: 8px; border-radius: 4px; background: var(--line); margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  ol.how { margin: 6px 0 12px; padding-left: 22px; } ol.how li { margin-bottom: 4px; }
+  code, kbd { font: 14px ui-monospace, Consolas, monospace; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+  textarea { width: 100%; height: 190px; font: 13px/1.45 ui-monospace, Consolas, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--bg); color: var(--ink); resize: vertical; }
+  .small { font-size: 14px; color: var(--quiet); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Toolbox trial</h1>
+  <p class="lead">Checks on your PC that a web page in Chrome can hand a file to another tool through the Toolbox folder and get the result back. Nothing leaves this PC; the "house" and the "bake" are made-up files.</p>
+
+  <nav class="roles">
+    <a id="roleSender" href="?role=sender">House Planner side</a>
+    <a id="roleReceiver" href="?role=receiver" target="_blank">Stand-in for Fresing Render (opens a second tab)</a>
+  </nav>
+
+  <section id="unsupported" hidden>
+    <h2>This browser cannot do it</h2>
+    <p>This browser cannot give a page a folder. Open this page in <b>Chrome</b> or <b>Edge</b> on a PC.</p>
+  </section>
+
+  <div id="app" hidden>
+    <section id="s1">
+      <h2><span class="n">1</span>Connect the Toolbox folder</h2>
+      <ol class="how" id="howPick">
+        <li>Press <b>Pick the Toolbox folder</b>.</li>
+        <li>In the window that opens, go to your own user folder: <code>C:\Users\&lt;your name&gt;</code>.</li>
+        <li>The first time: make a new folder there named <code>Toolbox</code>.</li>
+        <li>Click the <code>Toolbox</code> folder once and press <b>Select Folder</b>.</li>
+        <li>Chrome asks whether this site may edit files. Choose <b>Edit files</b> – and <b>Allow on every visit</b> when Chrome offers it.</li>
+      </ol>
+      <button id="pick">Pick the Toolbox folder</button>
+      <button id="allow" class="plain" hidden>Allow again</button>
+      <div id="folderState" class="state">Not connected yet.</div>
+    </section>
+
+    <!-- House Planner side -->
+    <section id="s2" class="off" data-role="sender">
+      <h2><span class="n">2</span>Open the stand-in</h2>
+      <p>The stand-in plays Fresing Render: it takes the house, "bakes" for a few seconds and sends a bake back. <a href="?role=receiver" target="_blank">Open it in a second tab</a>, connect the folder there too, and press <b>Start watching</b>.</p>
+      <div id="peerState" class="state">Waiting for the folder.</div>
+    </section>
+
+    <section id="s3" class="off" data-role="sender">
+      <h2><span class="n">3</span>Send a made-up house</h2>
+      <p><label>Size of the house file: <select id="size"><option value="0">small (a few hundred bytes)</option><option value="100">large (100 MB)</option></select></label></p>
+      <button id="send" disabled>Send to the stand-in</button>
+      <button id="cancel" class="plain" hidden>Cancel</button>
+      <div class="bar"><i id="bar"></i></div>
+      <div id="sendState" class="state">Nothing sent yet.</div>
+    </section>
+
+    <section id="s4" class="off" data-role="sender">
+      <h2><span class="n">4</span>Does Chrome remember the folder?</h2>
+      <p>After a round trip worked: close <b>all</b> Chrome windows, start Chrome again and open this page. This box then says whether Chrome still knew the folder without asking.</p>
+      <div id="memoryState" class="state">Nothing to say yet.</div>
+    </section>
+
+    <!-- Stand-in side -->
+    <section id="r2" class="off" data-role="receiver">
+      <h2><span class="n">2</span>Watch the inbox</h2>
+      <p><label>A "bake" takes <select id="bakeTime"><option value="8">8 seconds</option><option value="40">40 seconds</option></select></label></p>
+      <button id="watch" disabled>Start watching</button>
+      <button id="stop" class="plain" hidden>Stop</button>
+      <div class="bar"><i id="rbar"></i></div>
+      <div id="watchState" class="state">Not watching.</div>
+      <p class="small" style="margin-top:10px">Keep this tab open while you test. Try it once with both tabs visible side by side, and once with this tab hidden behind another tab – a hidden tab is slowed down by Chrome, and the report shows by how much.</p>
+    </section>
+
+    <section id="s5">
+      <h2>Report</h2>
+      <p>Everything measured in this tab. Press <b>Copy the report</b> and paste it back into the chat.</p>
+      <textarea id="report" readonly></textarea>
+      <p style="margin-top:10px"><button id="copy" class="plain">Copy the report</button><button id="cleanup" class="plain" disabled>Remove the trial tools from the folder</button></p>
+    </section>
+  </div>
+</main>
+
+<script src="../web/toolbox-folder.js"></script>
+<script>
+'use strict';
+const tb = ToolboxFolder;
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const ROLE = params.get('role') === 'receiver' ? 'receiver' : 'sender';
+const OPFS = params.has('opfs');               // automatic tests: the browser's private file system instead of a picked folder
+const SENDER = 'nl.fresing.trial.sender', RECEIVER = 'nl.fresing.trial.receiver';
+const ME = ROLE === 'sender' ? SENDER : RECEIVER, PEER = ROLE === 'sender' ? RECEIVER : SENDER;
+const URL_HERE = 'https://smholte.github.io/toolbox-format/trial/';
+const MANIFESTS = {
+  [SENDER]: { format: 'toolbox-tool', version: tb.VERSION, id: SENDER, name: 'Trial: House Planner side', app_version: '0.1', kind: 'web', url: URL_HERE,
+    description: 'Test page of the toolbox format. Safe to delete.',
+    actions: [{ id: 'import-bake', label: 'Import baked light', accepts: ['hpbake'] }], sends: ['hpscene'], handover: ['inbox'] },
+  [RECEIVER]: { format: 'toolbox-tool', version: tb.VERSION, id: RECEIVER, name: 'Trial: stand-in for Fresing Render', app_version: '0.1', kind: 'web', url: URL_HERE,
+    description: 'Test page of the toolbox format. Safe to delete.',
+    actions: [{ id: 'bake-house', label: 'Bake house scene', accepts: ['hpscene'], returns: ['hpbake'] }], handover: ['inbox'] },
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const secs = ms => (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
+let box = null, lines = [];
+if (params.has('bake')) { const o = document.createElement('option'); o.value = o.textContent = String(Number(params.get('bake')) || 1); $('bakeTime').append(o); $('bakeTime').value = o.value; }   // tests
+
+// ───────── the report
+function log(text) {
+  const t = new Date().toTimeString().slice(0, 8);
+  lines.push(`${t}  ${text}`);
+  $('report').value = [`Toolbox trial – ${ROLE === 'sender' ? 'House Planner side' : 'stand-in'} – format ${tb.VERSION}`,
+    `Browser: ${(navigator.userAgent.match(/(Edg|Chrome)\/[\d.]+/g) || [navigator.userAgent]).join(' ')} · ${navigator.platform} · installed app: ${matchMedia('(display-mode: standalone)').matches ? 'yes' : 'no'}`,
+    `Page: ${location.origin}${location.pathname}`, '', ...lines].join('\n');
+  $('report').scrollTop = 1e9;
+}
+function show(id, text, kind = '') { const el = $(id); el.textContent = text; el.className = 'state' + (kind ? ' ' + kind : ''); }
+function fail(id, e) { show(id, e instanceof tb.TbError ? e.message : `Something went wrong: ${e.message || e}`, 'bad'); log(`ERROR ${e.code || e.name}: ${e.message}`); }
+
+// ───────── made-up packages: a stored zip with one JSON file and, for the large one, padding
+function zipOf(files) {
+  const enc = new TextEncoder(), parts = [], dir = [];
+  let offset = 0;
+  const u16 = n => new Uint8Array([n & 255, n >> 8 & 255]), u32 = n => new Uint8Array([n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255]);
+  for (const [name, data] of files) {
+    const nm = enc.encode(name), crc = tb.crc32(data);
+    const head = [u32(0x04034b50), u16(20), u16(0x800), u16(0), u16(0), u16(0x5b72), u32(crc), u32(data.length), u32(data.length), u16(nm.length), u16(0), nm];
+    dir.push([u32(0x02014b50), u16(20), u16(20), u16(0x800), u16(0), u16(0), u16(0x5b72), u32(crc), u32(data.length), u32(data.length), u16(nm.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset), nm]);
+    parts.push(...head, data);
+    offset += 30 + nm.length + data.length;
+  }
+  const flat = dir.flat(), dirSize = flat.reduce((s, p) => s + p.length, 0);
+  return new Blob([...parts, ...flat, u32(0x06054b50), u16(0), u16(0), u16(dir.length), u16(dir.length), u32(dirSize), u32(offset), u16(0)]);
+}
+function madeUp(kind, megabytes, note) {
+  const doc = { format: kind === 'hpscene' ? 'house-scene' : 'house-bake', version: '1.0', note: `made-up by the toolbox trial, not a real package; ${note}` };
+  const files = [[kind === 'hpscene' ? 'scene.json' : 'bake.json', tb.toJson(doc)]];
+  if (megabytes) files.push(['padding.bin', new Uint8Array(megabytes * 1048576)]);
+  return { name: `trial-house.${kind}`, blob: zipOf(files) };
+}
+
+// ───────── step 1: the folder
+async function rootHandle(mayPick) {
+  if (OPFS) return (await navigator.storage.getDirectory()).getDirectoryHandle('Toolbox', { create: true });
+  let root = await tb.remembered();
+  if (!root && mayPick) root = await tb.pick();
+  return root;
+}
+async function connect(viaClick) {
+  try {
+    const root = await rootHandle(viaClick === 'pick');
+    if (!root) { show('folderState', 'Not connected yet.'); return; }
+    const state = await tb.permission(root, !!viaClick);
+    if (state !== 'granted') {
+      $('allow').hidden = false;
+      show('folderState', state === 'denied' ? `Chrome does not let this page use "${root.name}". Press Allow again, or pick the folder once more.` : `Chrome knows the folder "${root.name}" but wants your OK again. Press Allow again.`, 'warn');
+      return state;
+    }
+    box = await tb.open(root, ME, OPFS ? 'any' : true);
+    await box.writeManifest(MANIFESTS[ME]);
+    $('allow').hidden = true;
+    show('folderState', `Connected to the folder "${root.name || 'Toolbox'}". This page is in it as "${MANIFESTS[ME].name}".`, 'good');
+    document.querySelectorAll(`section[data-role="${ROLE}"]`).forEach(s => s.classList.remove('off'));
+    $('send').disabled = $('watch').disabled = $('cleanup').disabled = false;
+    $('howPick').hidden = true;
+    log(`Folder connected (${viaClick ? 'after a click: ' + viaClick : 'without a click'}).`);
+    if (ROLE === 'sender') { watchPeer(); watchInbox(); }
+    return 'granted';
+  } catch (e) {
+    if (e.name === 'AbortError') { show('folderState', 'No folder picked.'); return; }
+    if (e.name === 'SecurityError' || e.name === 'NotAllowedError') e = new tb.TbError('permission', `Chrome refused this folder (${e.message}). Pick a folder named Toolbox directly in your user folder – not Documents, Desktop or AppData themselves.`);
+    fail('folderState', e);
+  }
+}
+async function onLoad() {
+  if (!OPFS && !tb.supported()) { $('unsupported').hidden = false; return; }
+  $('app').hidden = false;
+  $(ROLE === 'sender' ? 'roleSender' : 'roleReceiver').classList.add('on');
+  if (ROLE === 'receiver') { $('roleReceiver').removeAttribute('target'); $('roleSender').target = '_blank'; }
+  document.querySelectorAll('section[data-role]').forEach(s => { s.hidden = s.dataset.role !== ROLE; });
+  log('Page opened.');
+  // what Chrome remembers, before anything is clicked
+  let root = null, state = 'none';
+  try { root = await rootHandle(false); if (root) state = await tb.permission(root, false); } catch (e) { state = 'error: ' + e.message; }
+  const before = localStorage.getItem('toolbox-trial-roundtrip');
+  if (!root) show('memoryState', before ? 'Chrome has forgotten the folder itself (not only the permission). It must be picked again.' : 'Nothing to say yet.', before ? 'bad' : '');
+  else if (state === 'granted') show('memoryState', before ? 'Chrome remembered the folder and the permission. No question was asked.' : 'The folder is connected.', 'good');
+  else show('memoryState', `Chrome remembered the folder but wants a click again (permission: ${state}).`, 'warn');
+  log(`On opening: folder ${root ? 'remembered' : 'not remembered'}, permission ${state}${before ? ', a round trip worked at ' + before : ''}.`);
+  if (root) await connect(null);
+}
+$('pick').onclick = async () => { if (!OPFS) await tb.forget().catch(() => {}); await connect('pick'); };
+$('allow').onclick = () => connect('allow');
+
+// ───────── House Planner side
+let current = null, peerTimer = null, inboxBusy = false;
+async function watchPeer() {
+  clearInterval(peerTimer);
+  const look = async () => {
+    try {
+      const t = await box.tool(RECEIVER);
+      if (!t) show('peerState', 'The stand-in has not been connected to this folder yet. Open it in a second tab.', 'warn');
+      else if (t.open) show('peerState', 'The stand-in is open and watching its inbox.', 'good');
+      else show('peerState', 'The stand-in is in the folder but not watching. Press Start watching in its tab. (A house can be sent anyway; it waits.)', 'warn');
+    } catch (e) { show('peerState', e.message, 'bad'); }
+  };
+  await look(); peerTimer = setInterval(look, 3000);
+}
+$('send').onclick = async () => {
+  $('send').disabled = true; $('bar').style.width = '0';
+  try {
+    const mb = Number($('size').value);
+    show('sendState', 'Making the house file…');
+    await sleep(30);
+    const t0 = performance.now();
+    const house = madeUp('hpscene', mb, 'house');
+    const made = performance.now();
+    const job = await box.send({ to: RECEIVER, action: 'bake-house', files: [house], ret: 'import-bake', title: `Trial house (${mb ? mb + ' MB' : 'small'})`,
+      onProgress: (a, b) => { $('bar').style.width = (40 * a / b) + '%'; show('sendState', `Writing the house into the stand-in's inbox… ${Math.round(100 * a / b)} %`); } });
+    const written = performance.now();
+    current = { job, t0, written, seen: null, hiddenAtSend: document.hidden, size: house.blob.size };
+    log(`Sent job ${job}: ${house.blob.size} bytes, made in ${secs(made - t0)}, written in ${secs(written - made)}.`);
+    $('cancel').hidden = false;
+    follow();
+  } catch (e) { fail('sendState', e); $('send').disabled = false; }
+};
+$('cancel').onclick = async () => { if (current) { await box.cancel(RECEIVER, current.job); log('Asked the stand-in to stop.'); } };
+async function follow() {
+  while (current) {
+    const c = current;
+    let st;
+    try { st = await box.status(RECEIVER, c.job); } catch (e) { fail('sendState', e); break; }
+    if (current !== c || c.arrived) break;                       // the bake arrived while this was reading
+    if (st && st.state !== 'sent' && c.seen === null) { c.seen = performance.now(); log(`The stand-in saw the job after ${secs(c.seen - c.written)}.`); }
+    if (!st) { show('sendState', 'The job is gone from the inbox.', 'warn'); break; }
+    if (st.state === 'sent') show('sendState', 'Written. Waiting for the stand-in to see it…');
+    else if (st.state === 'waiting' || st.state === 'working') { show('sendState', st.text || 'The stand-in is working…'); $('bar').style.width = (40 + 50 * (st.fraction || 0)) + '%'; }
+    else if (st.state === 'done') { show('sendState', st.reply ? 'Done. Waiting for the bake to arrive in this page\'s inbox…' : `Done, but no bake came back: ${st.text || ''}`, st.reply ? '' : 'warn'); if (!st.reply) break; }
+    else { show('sendState', `${st.state === 'cancelled' ? 'Cancelled' : 'Failed'}: ${st.text || st.code || ''}`, st.state === 'cancelled' ? 'warn' : 'bad'); log(`Job ended: ${st.state} ${st.code || ''} ${st.text || ''}`); await box.remove(RECEIVER, c.job); break; }
+    if (c.arrived) break;
+    await sleep(1000);
+  }
+  if (current && !current.arrived) { current = null; $('send').disabled = false; $('cancel').hidden = true; }
+}
+function watchInbox() {
+  setInterval(async () => {
+    if (inboxBusy || !box) return;
+    inboxBusy = true;
+    try {
+      for (const id of await box.pending()) {
+        let taken;
+        try { taken = await box.take(MANIFESTS[SENDER], id); } catch (e) {
+          if (e.code === 'not-complete') continue;
+          await box.writeStatus(id, 'failed', { code: e.code, text: e.message }); log(`A job in this page's inbox was refused: ${e.code} ${e.message}`); continue;
+        }
+        const { job, files } = taken, c = current && job.reply_to && job.reply_to.job === current.job ? current : null;
+        const bytes = files.reduce((s, f) => s + f.file.size, 0);
+        await files[0].file.slice(0, 64).arrayBuffer();              // really readable
+        if (c) {
+          c.arrived = performance.now();
+          const total = c.arrived - c.t0;
+          $('bar').style.width = '100%'; $('cancel').hidden = true; $('send').disabled = false;
+          show('sendState', `The bake came back: ${files[0].name}, ${bytes} bytes, checked as ${files[0].type}. Whole round trip: ${secs(total)}.`, 'good');
+          log(`Bake arrived as job ${id}: ${bytes} bytes, type ${files[0].type}. Round trip ${secs(total)} (this tab ${document.hidden ? 'hidden' : 'visible'} at arrival, ${c.hiddenAtSend ? 'hidden' : 'visible'} at sending).`);
+          localStorage.setItem('toolbox-trial-roundtrip', new Date().toTimeString().slice(0, 8));
+          await box.remove(RECEIVER, c.job);
+          current = null;
+        } else log(`A bake arrived for a job this tab did not send just now (job ${id}, answer to ${job.reply_to ? job.reply_to.job : '–'}): ${bytes} bytes. It waited in the inbox – that works.`);
+        await box.remove(SENDER, id);
+      }
+    } catch (e) { log(`ERROR while reading the inbox: ${e.name} ${e.message}`); }
+    inboxBusy = false;
+  }, 2000);
+}
+
+// ───────── stand-in side
+let watching = false;
+$('watch').onclick = async () => {
+  watching = true; $('watch').hidden = true; $('stop').hidden = false;
+  log('Started watching the inbox.');
+  let lastAlive = 0, lastTick = performance.now(), worst = 0;
+  while (watching) {
+    try {
+      const gap = performance.now() - lastTick; lastTick = performance.now();
+      if (gap > worst + 500 && gap > 3500) { worst = gap; log(`Chrome slowed this tab down: ${secs(gap)} between two looks at the inbox (tab ${document.hidden ? 'hidden' : 'visible'}).`); }
+      if (performance.now() - lastAlive > 8000) { await box.alive('0.1'); lastAlive = performance.now(); }
+      const ids = await box.pending();
+      if (!ids.length) show('watchState', `Watching the inbox. ${document.hidden ? '' : 'Nothing there right now.'}`, 'good');
+      for (const id of ids) await bake(id);
+    } catch (e) { fail('watchState', e); }
+    await sleep(2000);
+  }
+  await box.notAlive().catch(() => {});
+  show('watchState', 'Not watching.'); $('watch').hidden = false; $('stop').hidden = true;
+};
+$('stop').onclick = () => { watching = false; log('Stopped watching.'); };
+addEventListener('pagehide', () => { if (box && watching) box.notAlive().catch(() => {}); });
+async function bake(id) {
+  let taken;
+  try { taken = await box.take(MANIFESTS[RECEIVER], id); } catch (e) {
+    if (e.code === 'not-complete') return;
+    await box.writeStatus(id, 'failed', { code: e.code, text: e.message }); log(`Refused job ${id}: ${e.code} ${e.message}`); return;
+  }
+  const { job, files } = taken, t0 = performance.now(), total = Number($('bakeTime').value), house = files[0];
+  log(`Took job ${id} from ${job.from}: ${house.name}, ${house.file.size} bytes, checked as ${house.type}.`);
+  await box.writeStatus(id, 'working', { fraction: 0, text: 'Starting to bake' });
+  for (let s = 1; s <= total; s++) {
+    await sleep(1000);
+    if (await box.wantsCancel(id)) { await box.writeStatus(id, 'cancelled', { text: 'Stopped because the sender asked' }); show('watchState', 'The sender cancelled the job.', 'warn'); log(`Job ${id} cancelled after ${secs(performance.now() - t0)}.`); $('rbar').style.width = '0'; return; }
+    const moment = Math.min(8, Math.ceil(8 * s / total));
+    await box.writeStatus(id, 'working', { fraction: s / total, text: `Baking moment ${moment} of 8` });
+    $('rbar').style.width = (100 * s / total) + '%'; show('watchState', `"Baking" ${job.title || house.name}: moment ${moment} of 8…`);
+  }
+  const mb = house.file.size > 50 * 1048576 ? 100 : 0;
+  const reply = await box.sendReply(job, [madeUp('hpbake', mb, `answer to job ${id}`)], 'Baked 8 moments');
+  show('watchState', reply ? `Sent the bake back to ${job.from}. Watching the inbox.` : 'Baked, but the bake could not be sent back (see the job\'s status).', reply ? 'good' : 'warn');
+  log(`Job ${id} done in ${secs(performance.now() - t0)}; bake sent back as job ${reply}.`);
+  $('rbar').style.width = '0';
+}
+
+// ───────── report and cleaning up
+$('copy').onclick = async () => { $('report').select(); try { await navigator.clipboard.writeText($('report').value); $('copy').textContent = 'Copied'; } catch (e) { document.execCommand('copy'); } setTimeout(() => { $('copy').textContent = 'Copy the report'; }, 1500); };
+$('cleanup').onclick = async () => {
+  watching = false; clearInterval(peerTimer);
+  await sleep(2200);                                             // let the watching loop end first
+  for (const id of [SENDER, RECEIVER]) try { await box.tools.removeEntry(id, { recursive: true }); } catch (e) { /* not there */ }
+  localStorage.removeItem('toolbox-trial-roundtrip');
+  log('Removed the trial tools from the folder.');
+  show('folderState', 'The trial tools are removed from the folder. Reload the page to start again.');
+  $('send').disabled = $('watch').disabled = $('cleanup').disabled = true;
+};
+onLoad();
+</script>
+</body>
+</html>

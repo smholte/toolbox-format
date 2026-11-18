@@ -12,3 +12,12 @@ First version, for review. Not tagged.
   inbox, `cancel.json`, `alive.json`, cleaning up.
 - What a web page needs to take part (Chrome and Edge on a PC; the folder is picked once).
 - Checker (`check.py`), schemas, a made-up sample folder, tests on the samples and on broken copies.
+
+Added the same day, still 0.1:
+
+- `web/toolbox-folder.js` (a web tool's side) and `tbf/folder.py` (a native tool's side): reference code to copy.
+- `trial/`: a page to try the folder on a real PC; `tools/standin.py`: the receiving side as a program.
+- Tests in a real Chrome: JavaScript and Python name the same file types, refuse the same bad jobs, and read each
+  other's jobs.
+- Made stricter so both languages agree: reading a zip is written out step by step (5.2); patterns may not use a
+  bare `.`, `{,n}` or a count after a count; a time's offset is at most `23:59`.
