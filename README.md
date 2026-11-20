@@ -63,7 +63,7 @@ code is 1 when there is an error. Python 3.11 or newer.
 names, paths over 260 characters, names that Windows may treat as the same). It works only inside a new folder
 `C:\Users\<name>\Toolbox-check`, deletes it at the end and changes nothing else.
 
-1. Open <https://github.com/smholte/toolbox-format/blob/task/0010-windows-checks/tools/windows-checks.ps1>, click the
+1. Open <https://github.com/smholte/toolbox-format/blob/main/tools/windows-checks.ps1>, click the
    **Download raw file** button (top right of the file, the arrow pointing down) and save it in `Downloads`.
 2. Press the Windows key, type `powershell`, click **Windows PowerShell** (not "as administrator").
 3. Paste this line and press Enter (`-ExecutionPolicy Bypass` lifts Windows' block on scripts for this one run only):
