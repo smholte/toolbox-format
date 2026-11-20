@@ -17,7 +17,7 @@ from pathlib import Path
 import jsonschema
 
 from .detect import detect, load_types, type_problems
-from .names import (JOB_FILES, TIME_FIELDS, VERSION, JsonError, capitals, is_job_id, is_tool_id, is_type_ref,
+from .names import (JOB_FILES, TAKE_UP_LOCK, TIME_FIELDS, VERSION, JsonError, capitals, is_job_id, is_tool_id, is_type_ref,
                     load_json, name_problem, time_problem)
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
@@ -328,7 +328,7 @@ def check_job(folder: Path, rep: Report, types: list[dict], tool: dict | None = 
             if "reply" in doc and "return" not in job:
                 rep.warn(f"{where}/status.json: names a reply, but the job asked for none (no return)")
     for entry in sorted(folder.iterdir(), key=lambda e: e.name):
-        if capitals(entry.name) in seen or entry.name in JOB_FILES:
+        if capitals(entry.name) in seen or entry.name in JOB_FILES or entry.name == TAKE_UP_LOCK:
             continue
         rep.warn(f"{where}: {entry.name} is not named by job.json")
 

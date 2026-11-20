@@ -389,3 +389,73 @@ def test_nfc_is_the_same_in_python_311_to_313():
     pins a few that matter for file names"""
     for a, b in (("e\u0301", "\u00e9"), ("A\u030a", "\u00c5"), ("\u212b", "\u00c5"), ("o\u0308", "\u00f6")):
         assert unicodedata.normalize("NFC", a) == b
+
+
+# ---------------------------------------------------------------- found by an independent review of this branch
+def test_a_status_text_with_a_line_break_or_a_broken_character_stays_readable(box):
+    """a tool passes an error message as text; it must not make status.json unreadable – that let a final status be
+    written over (P1) and left an empty status.json behind"""
+    folder = fresh(box)
+    assert F.claim(box, RENDER, folder.name, "working")
+    assert F.write_status(box, RENDER, folder.name, "failed", text="Error:\nline 2\t\ud800 end")
+    st = F.read_status(box, RENDER, folder.name)
+    assert st["text"] == "Error: line 2 � end"
+    assert F.write_status(box, RENDER, folder.name, "working") is False
+    assert check(box).ok
+
+
+def test_a_key_that_is_not_utf8_is_refused_with_a_status_every_reader_reads(box):
+    folder = fresh(box)
+    text = (folder / "job.json").read_bytes().rstrip()
+    (folder / "job.json").write_bytes(text[:-1] + b', "options": {"\\ud800": 1, "a\\u0001b": 2}}')
+    with pytest.raises(F.JobProblem) as e:
+        F.take(box, F.read_tool(box, RENDER), folder)
+    assert F.refuse(box, RENDER, folder.name, e.value)
+    assert F.read_status(box, RENDER, folder.name)["code"] == "bad-job"
+    import subprocess
+    r = subprocess.run([sys.executable, str(ROOT / "check.py"), str(box)], capture_output=True, text=True)
+    assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+
+
+def test_take_up_never_lets_the_status_go_missing(box, monkeypatch):
+    """copy B has read the old status; copy A takes the job up completely before B goes on. B must see that and
+    stop – and a copy C looking at its inbox meanwhile never finds the job without a status (it did with the first
+    design: B moved A's new status aside, C took the job too, two copies held it)"""
+    folder = fresh(box)
+    F.claim(box, RENDER, folder.name, "working")
+    edit(folder / "status.json", lambda d: d.update(updated=ago(10)))
+    real_open, seen = os.open, {}
+
+    def slow_b(path, *a, **k):
+        if str(path).endswith(".taking-up") and "A" not in seen:
+            monkeypatch.setattr(os, "open", real_open)
+            seen["A"] = F.take_up(box, RENDER, folder.name, "working", text="A")
+            seen["C pending"] = [p.name for p in F.pending(box, RENDER)]
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(os, "open", slow_b)
+    assert F.take_up(box, RENDER, folder.name, "working", text="B") is False
+    assert seen == {"A": True, "C pending": []}
+    assert F.read_status(box, RENDER, folder.name)["text"] == "A"
+    assert sorted(p.name for p in folder.iterdir()) == ["job.json", "sample-house.hpscene", "status.json"]
+
+
+def test_a_take_up_lock_left_by_a_crash_goes_after_a_minute(box):
+    folder = fresh(box)
+    F.claim(box, RENDER, folder.name, "working")
+    edit(folder / "status.json", lambda d: d.update(updated=ago(10)))
+    lock = folder / F.TAKE_UP_LOCK
+    lock.write_bytes(b"")
+    assert not F.take_up(box, RENDER, folder.name, "working")             # another copy is taking it up
+    assert check(box).ok and not any(".taking-up" in w for w in check(box).warnings)
+    os.utime(lock, (time.time() - 90, time.time() - 90))
+    assert not F.take_up(box, RENDER, folder.name, "working") and not lock.exists()   # a crash's lock: deleted
+    assert F.take_up(box, RENDER, folder.name, "working", text="again")
+    assert F.read_status(box, RENDER, folder.name)["text"] == "again"
+
+
+def test_a_cancel_without_a_job_json_is_left_alone(box):
+    folder = job_folder(box, j=JOB2)
+    (folder / "status.json").unlink()
+    (folder / "job.json").unlink()
+    assert take(box, folder) == "not-complete"

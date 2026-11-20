@@ -22,6 +22,8 @@ TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]([01]\
 TIME_FIELDS = ("created", "updated", "asked", "seen")             # the times of the format's files
 
 JOB_FILES = ("job.json", "status.json", "cancel.json")          # the format's own files in a job folder
+TAKE_UP_LOCK = ".taking-up"   # in a job folder for a moment while a native tool takes a job up (6.3); a job's file
+                              # never starts with a dot (3.3), so the two cannot meet
 # names Windows keeps for devices, as the part of a name before its first dot (3.3) – a rule of the format, so a name
 # is refused even where a system would take it (task 0010 of smholte/ToolBox)
 DEVICES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"} | {
@@ -139,6 +141,11 @@ def _text_problem(s: str) -> str | None:
     return None
 
 
+def printable(s: str) -> str:
+    """text for a message: control characters and unpaired surrogates written as \\uXXXX, so it can be printed"""
+    return "".join(f"\\u{ord(c):04x}" if ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF else c for c in s)
+
+
 def _text_at(doc) -> tuple[str, str] | None:
     """(where, why) of the first key or text that breaks section 3.4, or of the first object or array nested deeper
     than 64 levels (the file's own object is level 1) – walking without recursion"""
@@ -152,10 +159,11 @@ def _text_at(doc) -> tuple[str, str] | None:
             if why:
                 return where, why
         elif isinstance(x, dict):
-            for k, v in reversed(list(x.items())):
+            for k in x:                          # keys first, in order (as JavaScript does), then their values
                 why = _text_problem(k)
                 if why:
                     return f"{where}/{k}", why
+            for k, v in reversed(list(x.items())):
                 todo.append((f"{where}/{k}", v, depth + 1))
         elif isinstance(x, list):
             todo.extend((f"{where}/{i}", v, depth + 1) for i, v in reversed(list(enumerate(x))))
@@ -185,5 +193,5 @@ def load_json(data: bytes, keys_twice: str = "refuse") -> dict:
         raise JsonError("is not a JSON object")
     hit = _text_at(doc)
     if hit is not None:
-        raise JsonError(f"{hit[1]} at {hit[0] or '/'}")
+        raise JsonError(f"{hit[1]} at {printable(hit[0]) or '/'}")
     return doc

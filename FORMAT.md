@@ -79,7 +79,7 @@ says that this is not the Toolbox folder, and that a tool like Fresing Render ma
 **Who writes what.** A tool writes only:
 
 - its own tool folder: `toolbox.json`, `alive.json`, an icon, `inbox/`, and `status.json` in the jobs of its inbox
-  (also moving it aside for a moment to take up a job left behind, 6.3);
+  (and, for a moment, the lock `.taking-up` there, 6.3);
 - new job folders in **other** tools' inboxes, and `cancel.json` in a job it sent;
 - deletions as section 7.4 allows.
 
@@ -410,11 +410,13 @@ while it worked on this"). A job whose status is younger may be held by another 
 alone. So **a copy that holds a job writes its status again at least every 2 minutes** whenever it is free to – also
 while it waits for its user.
 
-Taking up is done so that of several copies only one does it. Just before, the tool reads the status again and goes
-on only when it is still left. A **native tool** then moves `status.json` aside by renaming it to a name of its own
-(only one copy can move one file), checks that the moved file is the one it read – if not, another copy was first,
-and it puts the file back unless a new `status.json` is there – deletes it, and claims the job with an exclusive
-create as above. A **web tool** does it inside its lock and writes the new status over the old one.
+Taking up is done so that of several copies only one does it, and `status.json` is never missing meanwhile. A
+**native tool** creates the empty file `.taking-up` in the job's folder with an exclusive create; when that fails,
+another copy is taking the job up and this one leaves it (a `.taking-up` older than a minute was left by a crash
+and is deleted, so the job is taken up at a later look). The copy that made the lock reads `status.json` once more,
+and only when it is still the one it read writes the new status over it (whole, as always), then deletes the lock.
+(`.taking-up` starts with a dot, so it is never the name of a job's file, 3.3.) A **web tool** does the same inside
+its Web Lock, without the file.
 
 ### 6.4 `alive.json`
 
@@ -459,7 +461,8 @@ just before it writes it and does not write when it is final already – so a ca
 by `done`, and a copy that takes up a job never writes over another copy's end of it. `code` (1–32 of `a–z`, `0–9`,
 `-`) belongs to `failed` and is one of the codes of 6.3 – a reader MUST take an unknown or missing code as `error`.
 `fraction` belongs to `working` (a reader ignores it with other states), `reply` to `done`. `text` is one line, at
-most 200 characters.
+most 200 characters; the reference code turns a control character in it into a space and a broken one into U+FFFD,
+so an error message passed on as `text` can never make `status.json` unreadable.
 
 The sender reads `tools/<to>/inbox/<job>/status.json` (not more often than once a second) to show progress. A
 `status.json` that cannot be read at one look (it is just being replaced) is read again at the next. A `working`

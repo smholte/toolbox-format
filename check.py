@@ -25,6 +25,8 @@ def main(argv=None) -> int:
     ap.add_argument("--type", action="store_true", help="say which file type each file is, instead of checking")
     ap.add_argument("-q", "--quiet", action="store_true", help="print only what has problems")
     a = ap.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):    # a name this system cannot spell is printed escaped, never a crash
+        sys.stdout.reconfigure(errors="backslashreplace")
     if a.type:
         types, bad = load_types(), 0
         for p in a.paths:

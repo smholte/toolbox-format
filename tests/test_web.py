@@ -874,3 +874,49 @@ def test_0_2_send_writes_nfc_names_and_refuses_a_pair(page, tmp_path):
     out = dump_and_check(page, tmp_path)
     assert json.loads((out / "tools" / RENDER / "inbox" / r[0] / "job.json").read_text("utf-8"))["files"][0]["name"] == "hé.hpscene"
     assert r[1] == "bad-name"
+
+
+def test_0_2_review_texts_keys_and_odd_entries_are_handled_the_same(page, tmp_path):
+    """found by an independent review of this branch: a status text with a line break or a broken character, a key
+    that is not UTF-8, a folder named status.json, a cancel.json without a job.json"""
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    inbox = box / "tools" / RENDER / "inbox"
+    (inbox / JOB1 / "status.json").unlink()
+    text = (inbox / JOB1 / "job.json").read_bytes().rstrip()
+    (inbox / JOB1 / "job.json").write_bytes(text[:-1] + b', "options": {"\\ud800": 1}}')
+    (inbox / JOB2 / "status.json").unlink()
+    (inbox / JOB2 / "job.json").unlink()
+    odd = inbox / "20261118-210000-dddddd"
+    shutil.copytree(inbox / JOB1, odd)
+    (odd / "status.json").mkdir()
+    page.evaluate("t => harness.load(t)", tree_of(box) | {f"tools/{RENDER}/inbox/{odd.name}/status.json/keep": b64(b"")})
+    js = page.evaluate("""async ([me, j1, j2, odd]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest, out = [];
+      out.push(await box.pending());
+      const r = await harness.tried(() => box.take(m, j1)); out.push(r.code);
+      try { await box.take(m, j1); } catch (e) { out.push(await box.refuse(j1, e)); }
+      out.push((await box._status(j1)).code);
+      out.push((await harness.tried(() => box.take(m, j2))).code);
+      out.push(await box.claim(odd, 'working'));
+      await box.writeStatus(j1, 'failed', { text: 'x' });     // final already: nothing
+      return out; }""", [RENDER, JOB1, JOB2, odd.name])
+    me = F.read_tool(box, RENDER)
+    py = [[p.name for p in F.pending(box, RENDER)]]
+    try:
+        F.take(box, me, inbox / JOB1)
+    except F.JobProblem as p:
+        py += [p.code, F.refuse(box, RENDER, JOB1, p)]
+    py.append(F.read_status(box, RENDER, JOB1)["code"])
+    try:
+        F.take(box, me, inbox / JOB2)
+    except FileNotFoundError:
+        py.append("not-complete")
+    py.append(F.claim(box, RENDER, odd.name, "working"))
+    assert js == py == [[JOB1], "bad-job", True, "bad-job", "not-complete", False]
+    texts = ["Error:\nline 2\t\ud800 end", "x" * 300, "\U0001f3e0" * 201, "a\x7fb", "plain"]
+    page.evaluate("t => harness.load(t)", tree_of(SAMPLES / "Toolbox"))
+    js = page.evaluate("""async ([me, j, texts]) => { const box = await harness.box(me), out = [];
+      for (const t of texts) { await box.writeStatus(j, 'working', { text: t }); out.push((await box._status(j)).text); }
+      return out; }""", [RENDER, JOB2, texts])
+    assert js == [F.one_line(t) for t in texts]
+    assert js[0] == "Error: line 2 \ufffd end" and len(js[2]) == 200 and js[3] == "a b"

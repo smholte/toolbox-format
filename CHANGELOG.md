@@ -36,8 +36,9 @@ review offered a choice, the simpler rule was taken; that is said below.
 - **P1 – jobs left behind (6.3, 7.1).** Before: at its start a tool took up every `waiting`/`working` job – also one
   another running copy held, and the final status it wrote could change again. Now only a status more than 5 minutes
   old is taken up, a holder writes its status every 2 minutes, `take_up()` lets only one of several copies take a job
-  up (it moves `status.json` aside by a rename, then claims with an exclusive create; tested with 8 copies at once,
-  1500 times), and a final status is never written over. *App:* write the status of a held job every 2 minutes; use
+  up (a lock file `.taking-up` made with an exclusive create, the status read once more, then written over; tested
+  with 8 copies at once, 1500 times, and with the worst order of steps forced), and a final status is never written
+  over. A status `text` is made one line by the reference code, so an error message cannot make it unreadable. *App:* write the status of a held job every 2 minutes; use
   `unfinished()` + `take_up()`/`takeUp()` at start and once a minute; check the return value of `write_status`.
 - **P2 – own types without patterns (5.1).** Simpler of the review's two choices (the other: limits on counts).
   *App:* none today.
@@ -91,6 +92,12 @@ review offered a choice, the simpler rule was taken; that is said below.
 - **P31 – declined (6.3, 7.1).** A job the user declines ends `cancelled`; `failed` is for "could not".
 - **P32 – Web Locks (6.3, 9).** They cover one origin; copies on other origins rely on "only what I can place" and
   write the status at once when they take a job.
+- **Found by an independent review of this branch, and fixed:** a status `text` with a line break (an error message)
+  made `status.json` unreadable, after which a final status could be written over; a key that is not UTF-8 in a job
+  crashed Python's `refuse()` and left an empty `status.json`, and `check.py` crashed printing it; the first design
+  of `take_up()` (moving `status.json` aside) could, in a very narrow timing, let two copies hold one job and on
+  Windows leave a file behind; JavaScript's `claim()` failed on a folder named `status.json`; a `cancel.json` without
+  a `job.json` was answered. Each has a test in both languages where both judge it.
 - **Also fixed:** a test of the trial page (`tests/test_web.py`) failed once on GitHub by timing – it read the
   folder while the page was still removing a job, and while the stand-in tab wrote `alive.json`. It now waits for
   the page to finish, stops the stand-in first, and skips a browser's short-lived `.crswap` files.

@@ -143,6 +143,16 @@
     if (lone(s)) return 'is not UTF-8 text (an unpaired \\ud800–\\udfff escape)';
     return null;
   }
+  /** text a status may hold (7.1, 3.4): a control character becomes a space, an unpaired U+D800–U+DFFF becomes
+      U+FFFD, and it is cut to 200 characters – so an error message cannot make the status unreadable */
+  function oneLine(text) {
+    let out = '';
+    for (const c of String(text)) { const n = c.codePointAt(0); out += n < 32 || n === 127 ? ' ' : n >= 0xd800 && n <= 0xdfff ? '\ufffd' : c; }
+    return [...out].slice(0, 200).join('');
+  }
+  /** text for a message: control characters and unpaired surrogates written as \uXXXX */
+  const printable = s => { let out = ''; for (const c of s) { const n = c.codePointAt(0); out += n < 32 || n === 127 || (n >= 0xd800 && n <= 0xdfff) ? '\\u' + n.toString(16).padStart(4, '0') : c; } return out; };
+
   /** [where, why] of the first key or text that breaks 3.4, or of the first object or array nested deeper than 64
       levels (the file's own object is level 1), or null – walking without recursion */
   function textAt(doc) {
@@ -171,7 +181,7 @@
     try { doc = JSON.parse(text); } catch (e) { throw new TbError('json', 'is not JSON'); }
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new TbError('json', 'is not a JSON object');
     const hit = textAt(doc);
-    if (hit) throw new TbError('json', `${hit[1]} at ${hit[0] || '/'}`);
+    if (hit) throw new TbError('json', `${hit[1]} at ${printable(hit[0]) || '/'}`);
     return doc;
   }
 
@@ -517,6 +527,13 @@
   async function fileOf(dir, name) {
     try { return await (await dir.getFileHandle(name)).getFile(); } catch (e) { if (missing(e)) return null; throw e; }
   }
+  /** true when the folder holds an entry of this name, a file or a folder (as Python's exists()) */
+  async function there(dir, name) {
+    for (const get of ['getFileHandle', 'getDirectoryHandle']) {
+      try { await dir[get](name); return true; } catch (e) { if (!missing(e)) throw e; }
+    }
+    return false;
+  }
   /** write a file whole: the browser writes beside it and swaps it in when it is closed */
   async function write(dir, name, data) {
     const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
@@ -691,7 +708,7 @@
       if (!inbox) return out;
       for (const [name, h] of await entries(inbox)) {
         if (h.kind !== 'directory' || !isJobId(name)) continue;
-        if (await fileOf(h, 'job.json') && !await fileOf(h, 'status.json')) out.push(name);
+        if (await fileOf(h, 'job.json') && !await there(h, 'status.json')) out.push(name);
       }
       return out;
     }
@@ -721,7 +738,7 @@
         create a file exclusively, so call this inside exclusively(). */
     async claim(jobId, state = 'waiting', extra = {}) {
       const folder = await this._job(this.me, jobId);
-      if (!folder || await fileOf(folder, 'status.json')) return false;
+      if (!folder || await there(folder, 'status.json')) return false;
       return this.writeStatus(jobId, state, extra);
     }
 
@@ -745,9 +762,10 @@
     async take(manifest, jobId) {
       const folder = await this._job(this.me, jobId);
       if (!folder) throw new TbError('bad-job', 'the job is gone');
-      let cancel = null;
-      try { cancel = await fileOf(folder, 'cancel.json'); } catch (e) { throw new TbError('not-complete', `cancel.json cannot be read right now (${e.name})`); }
-      if (cancel) throw new TbError('cancelled', 'Cancelled by the sender before it was taken');
+      let hasJob, cancel;
+      try { hasJob = await fileOf(folder, 'job.json'); cancel = hasJob && await fileOf(folder, 'cancel.json'); } catch (e) { throw new TbError('not-complete', `job.json cannot be read right now (${e.name})`); }
+      if (!hasJob) throw new TbError('not-complete', 'no job.json yet');
+      if (cancel) throw new TbError('cancelled', 'Cancelled by the sender before it was taken');   // 6.3 step 2
       let job;
       try { job = await readDoc(folder, 'job.json', 'job'); } catch (e) {
         if (e instanceof TbError) throw new TbError('bad-job', e.message);
@@ -790,7 +808,7 @@
       if (old && FINAL.includes(old.state)) return false;
       const doc = { format: 'toolbox-status', version: VERSION, job: jobId, state, updated: now() };
       const more = state === 'failed' && (extra.code === undefined || extra.code === null) ? { ...extra, code: 'error' } : extra;
-      for (const k of ['fraction', 'text', 'code', 'reply']) if (more[k] !== undefined && more[k] !== null) doc[k] = k === 'text' ? [...more[k]].slice(0, 200).join('') : more[k];
+      for (const k of ['fraction', 'text', 'code', 'reply']) if (more[k] !== undefined && more[k] !== null) doc[k] = k === 'text' ? oneLine(more[k]) : more[k];
       await write(folder, 'status.json', toJson(doc));
       return true;
     }

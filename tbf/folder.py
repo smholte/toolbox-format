@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .check import FINAL, FOLDER_FILE, JUNCTION, Report, check_manifest, look, parse_doc, read_doc
 from .detect import detect, load_types
-from .names import VERSION, capitals, is_job_id, is_tool_id, name_problem
+from .names import TAKE_UP_LOCK, VERSION, capitals, is_job_id, is_tool_id, name_problem
 
 DAY = 24 * 3600
 ALIVE_FRESH = 30          # seconds: an alive.json older than this means "not watching"
@@ -43,7 +43,7 @@ class JobProblem(Exception):
 
     def __init__(self, code: str, text: str):
         super().__init__(text)
-        self.code, self.text = code, text[:200]
+        self.code, self.text = code, one_line(text)
         self.state = "cancelled" if code == "cancelled" else "failed"
 
 
@@ -219,12 +219,20 @@ def pending(root: Path, me: str) -> list[Path]:
     return sorted(found, key=lambda d: d.name)
 
 
+def one_line(text: str) -> str:
+    """text a status may hold (7.1, 3.4): a control character (line break, tab …) becomes a space, an unpaired
+    U+D800–U+DFFF becomes U+FFFD, and it is cut to 200 characters – so an error message cannot make the status
+    unreadable"""
+    return "".join(" " if ord(c) < 32 or ord(c) == 127 else "\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c
+                   for c in text)[:200]
+
+
 def _status_doc(job: str, state: str, fraction=None, text=None, code=None, reply=None) -> dict:
     """a status.json; a failed job always has a code (7.1): "error" when none is given"""
     if state == "failed" and code is None:
         code = "error"
     doc = {"format": "toolbox-status", "version": VERSION, "job": job, "state": state, "updated": now()}
-    for key, value in (("fraction", fraction), ("text", text and text[:200]), ("code", code), ("reply", reply)):
+    for key, value in (("fraction", fraction), ("text", text and one_line(text)), ("code", code), ("reply", reply)):
         if value is not None:
             doc[key] = value
     return doc
@@ -265,10 +273,10 @@ def unfinished(root: Path, me: str, at: datetime | None = None) -> list[tuple[Pa
 def claim(root: Path, me: str, job: str, state: str = "waiting", **more) -> bool:
     """Take a job: create its status.json only if it is not there yet. False when another copy of this tool was
     first (6.3). ``more``: fraction, text, code as for write_status."""
-    doc = _status_doc(job, state, **more)
+    data = _bytes(_status_doc(job, state, **more))      # made before the file: nothing half-made is left
     try:
         with open(root / "tools" / me / "inbox" / job / "status.json", "xb") as fh:
-            fh.write(_bytes(doc))
+            fh.write(data)
         return True
     except FileExistsError:
         return False
@@ -282,41 +290,48 @@ def refuse(root: Path, me: str, job: str, problem: JobProblem) -> bool:
     return claim(root, me, job, "failed", code=problem.code, text=problem.text)
 
 
+TAKE_UP_LOCK_STALE = 60       # seconds: a lock this old was left by a copy that crashed
+
+
 def take_up(root: Path, me: str, job: str, state: str, at: datetime | None = None, **more) -> bool:
     """Take up a job left behind (6.3): only when its status is still waiting or working and still 5 minutes old.
-    Of several copies that try at once only one may win, so: the old status.json is moved aside by a rename (only one
-    copy can move one file), compared with what was read, and the job is then claimed with an exclusive create.
-    False when the job is not left, another copy was first, or a file cannot be moved right now (try again at the
-    next look)."""
-    path = root / "tools" / me / "inbox" / job / "status.json"
+    Of several copies that try at once only one may win: the copy that creates the lock file .taking-up (an
+    exclusive create) reads the status once more, and only when it is still the one it read writes the new status
+    over it (whole, as always), then deletes the lock. status.json is never missing meanwhile. A lock older than a
+    minute was left by a crash and is deleted. False when the job is not left, another copy is taking it up, or a
+    file cannot be written right now (try again at the next look)."""
+    folder = root / "tools" / me / "inbox" / job
+    path, lock = folder / "status.json", folder / TAKE_UP_LOCK
     try:
         seen = path.read_bytes()
     except OSError:
         return False
-    rep = Report("")
-    if not is_left(parse_doc(seen, "status-0", rep, "", strict=False), at):
+    if not is_left(parse_doc(seen, "status-0", Report(""), "", strict=False), at):
         return False
-    aside = path.with_name(f"status.json.{os.getpid()}-{secrets.token_hex(4)}.tmp")
+    doc = _status_doc(job, state, **more)
     try:
-        os.rename(path, aside)
-    except OSError:                             # gone: another copy moved it first; or Windows: someone reads it
-        return False
-    try:
-        moved = aside.read_bytes()
-    except OSError:
-        moved = None
-    if moved != seen:                           # another copy took it up meanwhile: give its status back – the same
-        try:                                    # file (it may still be being written), and never over a newer one
-            os.link(aside, path)
-        except FileExistsError:
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        try:
+            if time.time() - lock.stat().st_mtime > TAKE_UP_LOCK_STALE:
+                lock.unlink()                   # left by a crash; taken up at the next look
+        except OSError:
             pass
-        except OSError:                         # a file system without hard links
-            if not path.exists():
-                os.replace(aside, path)
-        aside.unlink(missing_ok=True)
         return False
-    aside.unlink(missing_ok=True)
-    return claim(root, me, job, state, **more)
+    except OSError:
+        return False
+    try:
+        if path.read_bytes() != seen:           # another copy took it up, or its holder came back
+            return False
+        write_json(path, doc)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
 
 
 def is_stalled(status: dict | None, at: datetime | None = None) -> bool:
@@ -336,12 +351,12 @@ def take(root: Path, manifest: dict, folder: Path) -> tuple[dict, list[tuple[str
     Raises JobProblem (give it to refuse()): code "cancelled" when the sender cancelled before the job was taken,
     else the code of a failed status. Raises FileNotFoundError when job.json or a file cannot be read right now
     (another program holds it): try again at the next look (section 2)."""
-    if (folder / "cancel.json").is_file():
-        raise JobProblem("cancelled", "Cancelled by the sender before it was taken")
     try:
         data = (folder / "job.json").read_bytes()
     except OSError as e:
         raise FileNotFoundError(f"job.json cannot be read right now ({e.strerror or e})") from None
+    if (folder / "cancel.json").is_file():      # 6.3 step 2: before job.json is even read
+        raise JobProblem("cancelled", "Cancelled by the sender before it was taken")
     rep = Report("")
     job = parse_doc(data, "job-0", rep, "job.json", strict=False)
     if job is None:

@@ -88,6 +88,10 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   U+0590 too – the same in both for every character. NFC agrees on every character Python knows; it differs only for
   20 characters of four scripts new in Unicode 16 (above U+105C0). `tests/test_web.py` checks all 1.1 million.
 - Taking a job over from another copy: "delete `status.json`, then create it exclusively" let 6 of 8 copies win
-  (a slow copy deleted a status another had just written). Moving it aside with a rename (only one copy can move one
-  file), comparing, and putting a wrong one back with a hard link (never over a newer one, and the same file even
-  while it is still being written) gave one winner in 1500 rounds of 8 copies.
+  (a slow copy deleted a status another had just written). "Move it aside with a rename" passed 1500 rounds of 8
+  copies, yet an independent reviewer forced an order of steps where two copies held the job (the status was missing
+  for a moment) and saw it leave a file behind on Windows. What holds: an exclusive lock file `.taking-up`, the
+  status read once more, then written over – `status.json` is never missing. Force the worst order of steps in a
+  test (monkeypatch), do not trust a stress loop alone.
+- Any text a tool passes on (an error message as a status `text`) can hold a line break or a broken character; 3.4
+  then makes the whole file unreadable. The reference code cleans such text before it writes (`one_line`).
