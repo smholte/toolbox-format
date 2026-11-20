@@ -26,3 +26,13 @@ jobs:
         run: python check.py samples/Toolbox types.json
       - name: Tests (the checker and the folder code on the samples and on broken copies; the JavaScript in the machine's Chrome)
         run: python -m pytest -q tests
+
+  windows-checks:
+    name: Windows checks script (output only)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tools/windows-checks.ps1
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/windows-checks.ps1

@@ -57,6 +57,24 @@ python3 -m pytest -q tests          # the tests of the JavaScript need Chrome on
 `check.py` prints `OK` or a list of errors (a reader must refuse it) and warnings (readable, look at it); the exit
 code is 1 when there is an error. Python 3.11 or newer.
 
+## Windows checks
+
+`tools/windows-checks.ps1` asks Windows a few questions the format's file-name and path rules depend on (device-like
+names, paths over 260 characters, names that Windows may treat as the same). It works only inside a new folder
+`C:\Users\<name>\Toolbox-check`, deletes it at the end and changes nothing else.
+
+1. Open <https://github.com/smholte/toolbox-format/blob/task/0010-windows-checks/tools/windows-checks.ps1>, click the
+   **Download raw file** button (top right of the file, the arrow pointing down) and save it in `Downloads`.
+2. Press the Windows key, type `powershell`, click **Windows PowerShell** (not "as administrator").
+3. Paste this line and press Enter (`-ExecutionPolicy Bypass` lifts Windows' block on scripts for this one run only):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\windows-checks.ps1"
+```
+
+4. After a few seconds you see about 40 lines starting with `W1`, `W4`, `W5`, and at the end `Clean up: done`. The
+   same text is now on your clipboard: paste it into the chat (right-click in the chat box, Paste).
+
 ## Versions
 
 **0.1** was reviewed by the leads of House Planner and Fresing Render on 18 Nov 2026 and is tagged `v0.1`. Tools pin
