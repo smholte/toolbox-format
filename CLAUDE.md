@@ -74,3 +74,10 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   Python 3.12 reads JSON nested thousands deep, and a recursive walk over it then fails: walk without recursion.
   `json.loads` keeps a lone `\ud800` escape, which cannot be written back as UTF-8. Python's `\d` in a schema
   pattern takes Arabic digits too.
+- From the owner's PC (task 0010, 20 Nov 2026, Windows 11 build 10.0.26200, Windows PowerShell 5.1, .NET file calls, a normal
+  folder under the home folder; `tools/windows-checks.ps1`): all 14 names (`con .txt`, `COM0`, `LPT0`, `COM¹ ² ³`, `LPT¹ ² ³`
+  `.txt`, `CONIN$`, `CONOUT$`, `CLOCK$`, `con.txt.txt`, `aux`) made a real file, listed and read back – no device was
+  opened. This is what .NET did; other tools (Python, Blender, Edge) were not tried, so the rule stays "refuse these names".
+  A 311-character path was written, read and deleted, with "long paths" switched on (`LongPathsEnabled` = 1); with the
+  `\\?\` prefix too. Not tested with long paths switched off. `ſ`/`s`, `µ`/`μ`, `ı`/`I` and `é` as one character or `e`+accent
+  are all different files on NTFS (two files each), so names are compared as written.
