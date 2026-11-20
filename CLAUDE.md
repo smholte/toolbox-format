@@ -1,4 +1,5 @@
 # CLAUDE.md – toolbox format
+Project rules and tasks: `github.com/smholte/ToolBox` (`CLAUDE.md`, `TASKS.md`).
 
 How tools on one PC find each other and hand files to each other. Read `README.md`, then `FORMAT.md`.
 First users: **House Planner** (`smholte/house-planner` public, `smholte/house-planner-dev` private) and
@@ -64,3 +65,12 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   plain sentence instead.
 - From `house-scene-format`: all the author's tests can pass while an independent reviewer still finds crashes. Give
   the checker to someone who did not write it before the first tag.
+- From the first independent review (task 0001 of `smholte/ToolBox`, 18 Nov 2026): more places where the languages
+  differ, all now pinned by tests in `tests/test_review.py` and `tests/test_web.py` ("review"). A browser's
+  `TextDecoder('utf-8')` drops a byte-order mark at the start unless `ignoreBOM: true`. A plain JavaScript object
+  answers `obj['constructor']` and `obj['toString']`: look keys up with `hasOwnProperty`. Python reads past the end
+  of the bytes with an error, JavaScript with `undefined` (= 0 after `|`): bound every read. Python 3.11 and newer
+  refuse to turn more than 4300 digits into an int (`ValueError`), JavaScript gives `Infinity`. `json.loads` in
+  Python 3.12 reads JSON nested thousands deep, and a recursive walk over it then fails: walk without recursion.
+  `json.loads` keeps a lone `\ud800` escape, which cannot be written back as UTF-8. Python's `\d` in a schema
+  pattern takes Arabic digits too.
