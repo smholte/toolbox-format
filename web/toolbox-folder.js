@@ -1,4 +1,4 @@
-/* toolbox-folder.js — reference code for a web tool that takes part in the toolbox format 0.1 (FORMAT.md).
+/* toolbox-folder.js — reference code for a web tool that takes part in the toolbox format 0.2 (FORMAT.md).
 
    One plain file, no dependencies; a tool may copy it. It needs a browser that can give a page a folder
    (Chrome and Edge on a PC: showDirectoryPicker) – ask ToolboxFolder.supported() first and hide the buttons
@@ -14,10 +14,14 @@
      const st = await box.status('nl.fresing.render', job);         // { state, fraction, text … } or null
      await box.exclusively(async () => {                            // one window of this site at a time
        for (const j of await box.pending()) {                       // my own inbox: replies and other jobs
-         const { job, files } = await box.take(MY_MANIFEST, j);     // checked: names, sizes, types by content
-         if (!mine(job)) continue;                                  // a job this copy cannot place: leave it alone
-         …; await box.remove(box.me, job.job);
+         let taken;
+         try { taken = await box.take(MY_MANIFEST, j); }            // checked: names, sizes, types by content
+         catch (e) { if (e.code !== 'not-complete') await box.refuse(j, e); continue; }   // failed, or cancelled
+         if (!mine(taken.job)) continue;                            // a job this copy cannot place: leave it alone
+         …; await box.remove(box.me, j);
        }
+       for (const { id } of await box.unfinished()) …               // nobody has updated it for 5 minutes: takeUp(id, …)
+       await box.clean();                                           // 7.4
      });
 
    A page asks for the permission only from a click (Send, or a "Check" bar) – never at start (FORMAT.md 9).
@@ -27,8 +31,10 @@
 (function (global) {
   'use strict';
 
-  const VERSION = '0.1';
+  const VERSION = '0.2';
   const HEAD = 65536, ZIP_JSON_MAX = 1 << 20, MAX_JSON = 1 << 20, MAX_DEPTH = 4, MAX_PATTERN = 200;
+  const MAX_JSON_DEPTH = 64, MAX_TOOL_ID = 60, MAX_NAME = 80, MAX_NAME_BYTES = 255;
+  const DAY = 24 * 3600 * 1000;
   const FOLDER_FILE = 'toolbox-folder.json';
   const FINAL = ['done', 'failed', 'cancelled'];
   const ALIVE_FRESH = 30;      // seconds
@@ -56,34 +62,53 @@
   /* TYPES-END */
 
   /** an error with a short code: 'unsupported', 'not-toolbox', 'version', 'json', 'no-tool', 'no-action',
-      'wrong-type', 'bad-name', 'bad-job', 'unknown-action', 'not-complete', 'permission' */
+      'wrong-type', 'bad-name', 'bad-job', 'unknown-action', 'not-complete', 'cancelled', 'permission' */
   class TbError extends Error {
     constructor(code, text) { super(text); this.name = 'TbError'; this.code = code; }
   }
 
   // ───────────────────────── names, times, ids (FORMAT.md section 3)
   const TOOL_ID = /^[a-z0-9]+(-[a-z0-9]+)*(\.[a-z0-9]+(-[a-z0-9]+)*)+$/;
-  const JOB_ID = /^[a-z0-9][a-z0-9-]{7,63}$/;
+  const JOB_ID = /^[a-z0-9][a-z0-9-]{7,31}$/;
   const SHORT = /^[a-z0-9][a-z0-9-]{0,31}$/;
   const EXT = /^\.[a-z0-9]{1,16}$/;
   const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/;
   const JOB_FILES = ['job.json', 'status.json', 'cancel.json'];
-  const WINDOWS = new Set(['con', 'prn', 'aux', 'nul', ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap(i => ['com' + i, 'lpt' + i])]);
+  // names Windows keeps for devices, as the part of a name before its first dot (3.3): a rule of the format
+  const DEVICES = new Set(['CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$', 'CLOCK$', ...['COM', 'LPT'].flatMap(d => [...'0123456789\u00b9\u00b2\u00b3'].map(n => d + n))]);
+  const CAPITALS_BELOW = 0x590;    // Latin, Greek, Cyrillic, Armenian: the scripts whose capitals every version agrees on
 
-  const isToolId = s => typeof s === 'string' && s.length <= 80 && TOOL_ID.test(s);
+  const isToolId = s => typeof s === 'string' && s.length <= MAX_TOOL_ID && TOOL_ID.test(s);
   const isJobId = s => typeof s === 'string' && JOB_ID.test(s);
   const hasControl = s => { for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c < 32 || c === 127) return true; } return false; };
+  const lone = s => typeof s.isWellFormed === 'function' ? !s.isWellFormed() : /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(s);
+
+  /** the text two file names are compared by (3.3): every character below U+0590 whose capital is below U+0590 too
+      becomes that capital; every other character stays as written. Plain toUpperCase() is not used: the browser and
+      Python know different Unicode versions and differ from U+0590 on (and for a few letters below it, like ƛ). */
+  function capitals(s) {
+    let out = '';
+    for (const c of s) {
+      const u = c.codePointAt(0) < CAPITALS_BELOW ? c.toUpperCase() : c;
+      out += [...u].every(x => x.codePointAt(0) < CAPITALS_BELOW) ? u : c;
+    }
+    return out;
+  }
+  const OWN_FILES = new Set(JOB_FILES.map(capitals));
 
   /** why `name` is not a file name every system takes (3.3); null when it is */
   function nameProblem(name) {
     if (typeof name !== 'string' || !name) return 'is empty';
-    if ([...name].length > 120) return 'is longer than 120 characters';
+    if ([...name].length > MAX_NAME) return `is longer than ${MAX_NAME} characters`;
+    if (lone(name)) return 'is not UTF-8 text (an unpaired \\ud800–\\udfff)';
+    if (new TextEncoder().encode(name).length > MAX_NAME_BYTES) return `is longer than ${MAX_NAME_BYTES} bytes in UTF-8`;
     if (hasControl(name)) return 'holds a control character';
     const bad = [...'"*/:<>?\\|'].find(c => name.includes(c));
     if (bad) return `holds '${bad}'`;
     if (' .'.includes(name[0]) || ' .'.includes(name[name.length - 1])) return 'starts or ends with a space or a dot';
-    if (WINDOWS.has(name.split('.')[0].toLowerCase())) return 'is a name Windows keeps for itself';
-    if (JOB_FILES.includes(name.toLowerCase())) return "is one of the format's own files";
+    if (name.normalize('NFC') !== name) return 'is not in Unicode NFC form (an é must be one character, not e and an accent)';
+    if (DEVICES.has(capitals(name.split('.')[0].replace(/ +$/, '')))) return 'is a name Windows keeps for a device';
+    if (OWN_FILES.has(capitals(name))) return "is one of the format's own files";
     return null;
   }
 
@@ -113,17 +138,26 @@
   }
 
   // ───────────────────────── strict JSON (3.4)
-  const lone = s => typeof s.isWellFormed === 'function' ? !s.isWellFormed() : /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/.test(s);
   function textProblem(s) {
     if (hasControl(s)) return 'holds a control character (line break, tab …)';
     if (lone(s)) return 'is not UTF-8 text (an unpaired \\ud800–\\udfff escape)';
     return null;
   }
-  /** [where, why] of the first key or text that breaks 3.4, or null */
-  function textAt(x, where) {
-    if (typeof x === 'string') { const why = textProblem(x); return why ? [where, why] : null; }
-    if (Array.isArray(x)) { for (let i = 0; i < x.length; i++) { const h = textAt(x[i], `${where}/${i}`); if (h) return h; } return null; }
-    if (x && typeof x === 'object') for (const k of Object.keys(x)) { const why = textProblem(k); if (why) return [`${where}/${k}`, why]; const h = textAt(x[k], `${where}/${k}`); if (h) return h; }
+  /** [where, why] of the first key or text that breaks 3.4, or of the first object or array nested deeper than 64
+      levels (the file's own object is level 1), or null – walking without recursion */
+  function textAt(doc) {
+    const todo = [['', doc, 1]];
+    while (todo.length) {
+      const [where, x, depth] = todo.pop();
+      if (x && typeof x === 'object' && depth > MAX_JSON_DEPTH) return [where, `is nested deeper than ${MAX_JSON_DEPTH} levels`];
+      if (typeof x === 'string') { const why = textProblem(x); if (why) return [where, why]; }
+      else if (Array.isArray(x)) { for (let i = x.length - 1; i >= 0; i--) todo.push([`${where}/${i}`, x[i], depth + 1]); }
+      else if (x && typeof x === 'object') {
+        const keys = Object.keys(x);
+        for (const k of keys) { const why = textProblem(k); if (why) return [`${where}/${k}`, why]; }
+        for (let i = keys.length - 1; i >= 0; i--) todo.push([`${where}/${keys[i]}`, x[keys[i]], depth + 1]);
+      }
+    }
     return null;
   }
 
@@ -136,8 +170,7 @@
     try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch (e) { throw new TbError('json', 'is not UTF-8'); }
     try { doc = JSON.parse(text); } catch (e) { throw new TbError('json', 'is not JSON'); }
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new TbError('json', 'is not a JSON object');
-    let hit;
-    try { hit = textAt(doc, ''); } catch (e) { throw new TbError('json', 'is nested too deep'); }
+    const hit = textAt(doc);
     if (hit) throw new TbError('json', `${hit[1]} at ${hit[0] || '/'}`);
     return doc;
   }
@@ -148,12 +181,12 @@
 
   // ───────────────────────── what a file of the format must look like (the schemas, by hand)
   const str = (min, max) => v => typeof v === 'string' && [...v].length >= min && [...v].length <= max;
-  const typeRef = v => typeof v === 'string' && v.length <= 80 && (/^ext:[a-z0-9]{0,16}$/.test(v) || SHORT.test(v) || TOOL_ID.test(v));
+  const typeRef = v => typeof v === 'string' && v.length <= MAX_TOOL_ID && (/^ext:[a-z0-9]{0,16}$/.test(v) || SHORT.test(v) || TOOL_ID.test(v));
   const typeList = min => v => Array.isArray(v) && v.length >= min && v.length <= 100 && v.every(typeRef) && new Set(v).size === v.length;
   const obj = (required, optional) => v => !!v && typeof v === 'object' && !Array.isArray(v) && shape(v, required, optional) === null;
   const list = (item, min, max) => v => Array.isArray(v) && v.length >= min && v.length <= max && v.every(item);
   const time = v => timeProblem(v) === null;
-  const fileItem = obj({ name: str(1, 120), type: typeRef, size: v => Number.isSafeInteger(v) && v >= 0 }, {});
+  const fileItem = obj({ name: str(1, MAX_NAME), type: typeRef, size: v => Number.isSafeInteger(v) && v >= 0 }, {});   // size ≤ 2^53 − 1
   const https = v => str(1, 300)(v) && v.startsWith('https://');
 
   function shape(doc, required, optional) {
@@ -179,7 +212,7 @@
       id: isToolId, name: str(1, 60), kind: v => v === 'native' || v === 'web',
       actions: list(obj({ id: v => typeof v === 'string' && SHORT.test(v), label: str(1, 60), accepts: typeList(1) }, { returns: typeList(0) }), 0, 50),
     }, {
-      app_version: str(1, 40), description: str(0, 300), homepage: https, url: https, icon: str(1, 120),
+      app_version: str(1, 40), description: str(0, 300), homepage: https, url: https, icon: str(1, MAX_NAME),
       start: obj({ program: str(1, 400) }, { args: list(str(0, 400), 0, 40) }),
       types: list(v => !!v && typeof v === 'object' && !Array.isArray(v), 0, 50), sends: typeList(0),
       handover: v => Array.isArray(v) && v.every(x => x === 'inbox') && new Set(v).size === v.length,
@@ -229,6 +262,8 @@
     if (p[i] === ']') return [i, 'has an empty [] group'];
     const items = [];                // [text, is a class like \d]
     while (i < p.length && p[i] !== ']') {
+      if (p[i] === '[') return [i, 'has a [ inside a set (write \\[)'];          // Python warns these will change meaning
+      if ('-&|~'.includes(p[i]) && p[i + 1] === p[i]) return [i, `has ${p[i] + p[i]} inside a set`];
       if (p[i] === '\\') {
         const nxt = p[i + 1];
         if (nxt === undefined) return [i, 'ends with a backslash'];
@@ -297,10 +332,19 @@
     if (key === 'zip_has' || key === 'zip_json') {
       const want = key === 'zip_has' ? ['file'] : ['equals', 'field', 'file'];
       if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).sort().join() !== want.join() || !Object.values(v).every(x => typeof x === 'string' && x)) return `${key}: needs exactly ${want.join(', ')}`;
+      if (!/^[\x20-\x7e]+$/.test(v.file)) return `${key}: the name of a file inside a zip is plain ASCII`;
       if (v.file.startsWith('/') || v.file.includes('\\') || v.file.split('/').some(part => ['', '.', '..'].includes(part))) return `${key}: not a plain path inside a zip`;
       return null;
     }
     return `'${key}' is not a rule this version knows`;
+  }
+
+  /** a valid rule holds a head_matches somewhere */
+  function usesPattern(rule) {
+    const key = Object.keys(rule)[0], v = rule[key];
+    if (key === 'all' || key === 'any') return v.some(usesPattern);
+    if (key === 'not') return usesPattern(v);
+    return key === 'head_matches';
   }
 
   function typeProblem(t, own) {
@@ -310,7 +354,10 @@
     if (own ? !isToolId(t.id) : !(typeof t.id === 'string' && SHORT.test(t.id))) return own ? "a tool's own type is named like a tool, with dots" : 'bad type id';
     if (!str(1, 60)(t.name)) return 'a name of 1 to 60 characters';
     if (!Array.isArray(t.extensions) || !t.extensions.length || !t.extensions.every(e => typeof e === 'string' && EXT.test(e)) || new Set(t.extensions).size !== t.extensions.length) return 'extensions: at least one like ".step"';
-    if ('detect' in t) { const p = ruleProblem(t.detect); if (p) return p; }
+    if ('detect' in t) {
+      const p = ruleProblem(t.detect); if (p) return p;
+      if (own && usesPattern(t.detect)) return "a tool's own type may not use head_matches (only the built-in list may)";
+    }
     if ('by_content' in t && typeof t.by_content !== 'boolean') return 'by_content: true or false';
     if (t.by_content && !('detect' in t)) return 'by_content needs a detect rule';
     return null;
@@ -595,14 +642,14 @@
       if (!act) throw new TbError('no-action', `${tool.manifest.name} has no action ${action}`);
       const types = await this.types(), listed = [], seen = new Set();
       for (const f of files) {
-        const name = f.name, blob = f.blob || f, why = nameProblem(name);
-        if (why || seen.has(name.toLowerCase())) throw new TbError('bad-name', `the file name '${name}' ${why || 'is there twice'}`);
-        seen.add(name.toLowerCase());
+        const name = f.name.normalize('NFC'), blob = f.blob || f, why = nameProblem(name);   // names are NFC (3.3)
+        if (why || seen.has(capitals(name))) throw new TbError('bad-name', `the file name '${name}' ${why || 'is there twice'}`);
+        seen.add(capitals(name));
         const { type } = await detectType(blob, types, name);
         if (!act.accepts.includes(type)) throw new TbError('wrong-type', `${tool.manifest.name} does not accept ${type} for ${act.label} (${name})`);
         listed.push({ name, type, size: blob.size, blob });
       }
-      const job = newJobId(), inbox = await sub(await this._tool(to), 'inbox', true), folder = await sub(inbox, job, true);
+      const job = newJobId(), inbox = await sub(await this._tool(to), 'inbox', true), folder = await sub(inbox, job, true);   // makes a missing inbox (6.2)
       const total = listed.reduce((s, f) => s + f.size, 0); let done = 0;
       for (const f of listed) {
         const w = await (await folder.getFileHandle(f.name, { create: true })).createWritable();
@@ -649,16 +696,23 @@
       return out;
     }
 
-    /** Jobs an earlier run left: those of my inbox whose status is waiting or working, as [{ id, status }].
-        A tool looks once, at its start (6.3). */
-    async unfinished() {
+    async _status(jobId) {
+      const folder = await this._job(this.me, jobId);
+      if (!folder) return null;
+      try { return await readDoc(folder, 'status.json', 'status'); } catch (e) { return null; }   // half there: next time
+    }
+
+    /** Jobs left behind: those of my inbox whose status is waiting or working and has not been updated for 5
+        minutes, as [{ id, status }] – a run that closed or crashed, never a job another open copy holds. Take each
+        up with takeUp(). Look at start and about once a minute (6.3). */
+    async unfinished(at = Date.now()) {
       const t = await this._tool(this.me), inbox = t && await sub(t, 'inbox'), out = [];
       if (!inbox) return out;
       for (const [name, h] of await entries(inbox)) {
         if (h.kind !== 'directory' || !isJobId(name)) continue;
         let st = null;
         try { st = await readDoc(h, 'status.json', 'status'); } catch (e) { /* half there: next time */ }
-        if (st && !FINAL.includes(st.state)) out.push({ id: name, status: st });
+        if (isLeft(st, at)) out.push({ id: name, status: st });
       }
       return out;
     }
@@ -668,8 +722,21 @@
     async claim(jobId, state = 'waiting', extra = {}) {
       const folder = await this._job(this.me, jobId);
       if (!folder || await fileOf(folder, 'status.json')) return false;
-      await this.writeStatus(jobId, state, extra);
-      return true;
+      return this.writeStatus(jobId, state, extra);
+    }
+
+    /** the status a job take() refused gets: failed with the error's code, or cancelled when the sender cancelled
+        it before it was taken (6.3); only when the job has no status yet */
+    async refuse(jobId, err) {
+      if (err.code === 'cancelled') return this.claim(jobId, 'cancelled', { text: err.message });
+      return this.claim(jobId, 'failed', { code: err.code, text: err.message });
+    }
+
+    /** Take up a job left behind (6.3): only when its status is still waiting or working and still 5 minutes old,
+        read again just before. Call it inside exclusively(). */
+    async takeUp(jobId, state, extra = {}, at = Date.now()) {
+      if (!isLeft(await this._status(jobId), at)) return false;
+      return this.writeStatus(jobId, state, extra);
     }
 
     /** Check a job of my inbox as 6.3 says: { job, files: [{ name, type, file }] }. Throws TbError with the
@@ -678,6 +745,9 @@
     async take(manifest, jobId) {
       const folder = await this._job(this.me, jobId);
       if (!folder) throw new TbError('bad-job', 'the job is gone');
+      let cancel = null;
+      try { cancel = await fileOf(folder, 'cancel.json'); } catch (e) { throw new TbError('not-complete', `cancel.json cannot be read right now (${e.name})`); }
+      if (cancel) throw new TbError('cancelled', 'Cancelled by the sender before it was taken');
       let job;
       try { job = await readDoc(folder, 'job.json', 'job'); } catch (e) {
         if (e instanceof TbError) throw new TbError('bad-job', e.message);
@@ -685,21 +755,22 @@
       }
       if (!job) throw new TbError('not-complete', 'no job.json yet');
       if (job.job !== jobId || job.to !== this.me || job.from === job.to) throw new TbError('bad-job', "the job is not for this tool, or its id is not its folder's name");
+      if ('reply_to' in job && (job.reply_to.tool !== job.from || 'return' in job)) throw new TbError('bad-job', 'a reply comes from the tool that did the job and asks for no reply itself');
       const act = manifest.actions.find(a => a.id === job.action);
       if (!act) throw new TbError('unknown-action', `${manifest.name} has no action ${job.action}`);
       const types = await this.types(), files = [], seen = new Set();
       for (const f of job.files) {
         const why = nameProblem(f.name);
-        if (why || seen.has(f.name.toLowerCase())) throw new TbError('bad-job', `the file name '${f.name}' ${why || 'is listed twice'}`);
-        seen.add(f.name.toLowerCase());
+        if (why || seen.has(capitals(f.name))) throw new TbError('bad-job', `the file name '${f.name}' ${why || 'is listed twice'}`);
+        seen.add(capitals(f.name));
         let file = null;
         try { file = await (await folder.getFileHandle(f.name)).getFile(); } catch (e) {
           if (e.name === 'TypeMismatchError') throw new TbError('bad-job', `${f.name} is not a plain file`);
           if (e.name === 'TypeError') throw new TbError('bad-job', `the file name '${f.name}' cannot be used on this system`);
           if (e.name !== 'NotFoundError') throw new TbError('not-complete', `${f.name} cannot be read right now (${e.name})`);
         }
-        if (!file || file.size < f.size) throw new TbError('not-complete', `${f.name} is not complete yet`);
-        if (file.size !== f.size) throw new TbError('bad-job', `${f.name} is larger than job.json says`);
+        if (!file) throw new TbError('bad-job', `${f.name} is missing`);        // job.json is written last: it never comes
+        if (file.size !== f.size) throw new TbError('bad-job', `${f.name} is ${file.size} bytes, job.json says ${f.size}`);
         let type;
         try { ({ type } = await detectType(file, types, f.name)); } catch (e) { throw new TbError('not-complete', `${f.name} cannot be read right now (${e.name})`); }
         if (type !== f.type) throw new TbError('wrong-type', `${f.name} is ${type}, not ${f.type}`);
@@ -709,13 +780,19 @@
       return { job, files };
     }
 
-    /** write the status of a job of my inbox (7.1): state, and optional fraction, text, code, reply */
+    /** Write the status of a job of my inbox (7.1): state, and optional fraction, text, code, reply. A failed job
+        always has a code ('error' when none is given). A final status is never written over: it is read just before,
+        and false returned when it is final already. */
     async writeStatus(jobId, state, extra = {}) {
       const folder = await this._job(this.me, jobId);
-      if (!folder) return;
+      if (!folder) return false;
+      const old = await this._status(jobId);
+      if (old && FINAL.includes(old.state)) return false;
       const doc = { format: 'toolbox-status', version: VERSION, job: jobId, state, updated: now() };
-      for (const k of ['fraction', 'text', 'code', 'reply']) if (extra[k] !== undefined && extra[k] !== null) doc[k] = k === 'text' ? [...extra[k]].slice(0, 200).join('') : extra[k];
+      const more = state === 'failed' && (extra.code === undefined || extra.code === null) ? { ...extra, code: 'error' } : extra;
+      for (const k of ['fraction', 'text', 'code', 'reply']) if (more[k] !== undefined && more[k] !== null) doc[k] = k === 'text' ? [...more[k]].slice(0, 200).join('') : more[k];
       await write(folder, 'status.json', toJson(doc));
+      return true;
     }
 
     async wantsCancel(jobId) { const folder = await this._job(this.me, jobId); return !!folder && !!await fileOf(folder, 'cancel.json'); }
@@ -729,6 +806,29 @@
       }
       await this.writeStatus(job.job, 'done', { text, reply });
       return reply;
+    }
+
+    /** Clean up my inbox (7.4): a job a day after its final status, any job 30 days after it was created; a folder
+        whose job.json is missing or cannot be read is dated by its newest file, one without files is left alone. */
+    async clean(at = Date.now()) {
+      const t = await this._tool(this.me), inbox = t && await sub(t, 'inbox');
+      if (!inbox) return;
+      const doc = async (h, name, kind) => { try { return await readDoc(h, name, kind); } catch (e) { if (e instanceof TbError) return null; throw e; } };
+      for (const [name, h] of await entries(inbox)) {
+        if (h.kind !== 'directory' || !isJobId(name)) continue;
+        let age = null, final = false;
+        try {
+          const st = await doc(h, 'status.json', 'status'), job = st && FINAL.includes(st.state) ? null : await doc(h, 'job.json', 'job');
+          if (st && FINAL.includes(st.state)) { age = at - Date.parse(st.updated); final = true; }
+          else if (job) age = at - Date.parse(job.created);
+          else {
+            let newest = null;
+            for (const [, f] of await entries(h)) if (f.kind === 'file') newest = Math.max(newest === null ? 0 : newest, (await f.getFile()).lastModified);
+            if (newest !== null) age = at - newest;
+          }
+        } catch (e) { continue; }                                   // cannot be read right now: next time
+        if (age !== null && (age > 30 * DAY || (final && age > DAY))) await this.remove(this.me, name);
+      }
     }
 
     /** Delete a job folder: a reply I took in, or a job I sent whose final status I have read (7.4). false when
@@ -759,6 +859,14 @@
     return box;
   }
 
+  /** true when a waiting or working status has not been updated for 5 minutes: nobody holds the job any more, and a
+      copy of the receiving tool may take it up (6.3). A copy that keeps a job writes its status every 2 minutes. */
+  function isLeft(status, at = Date.now()) {
+    if (!status || (status.state !== 'waiting' && status.state !== 'working')) return false;
+    const seen = Date.parse(status.updated);
+    return Number.isNaN(seen) || at - seen > STALLED * 1000;
+  }
+
   /** true when a working status has not been updated for 5 minutes: only then say that nothing has been heard.
       A busy tool cannot write, so a fresh 'working' is believed whatever alive.json says (6.4). */
   function stalled(status, at = Date.now()) {
@@ -768,8 +876,8 @@
   }
 
   global.ToolboxFolder = {
-    VERSION, TYPES, FINAL, TbError, stalled, supported, remembered, remember, forget, pick, permission, open,
-    detectType, nameProblem, timeProblem, patternProblem, ruleProblem, typeProblem, docProblem, manifestProblem,
+    VERSION, TYPES, FINAL, TbError, stalled, isLeft, supported, remembered, remember, forget, pick, permission, open,
+    detectType, nameProblem, capitals, timeProblem, patternProblem, ruleProblem, typeProblem, docProblem, manifestProblem,
     parseJson, toJson, now, newJobId, isToolId, isJobId, crc32,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

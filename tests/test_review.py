@@ -74,16 +74,16 @@ BIG_INT = b"1" + b"0" * 5000
 
 # ---------------------------------------------------------------- JSON at its limits
 def test_deeply_nested_json_is_no_crash(box):
-    """How deep a reader can go is not in the format yet (a proposal of the review); Python 3.11 refuses 3000
-    levels, 3.12 and JavaScript read them. Either is fine here – a crash is not."""
+    """Python 3.11 refuses 3000 levels, 3.12 and JavaScript read them; since 0.2 the format allows 64 (3.4), so
+    both refuse. A crash is never fine."""
     try:
         load_json(b'{"x":' + DEEP + b"}")
     except JsonError:
         pass
     folder = fresh_job(box)
     with_options(folder, DEEP)
-    check(box)                                  # was: RecursionError (Python 3.12 and newer)
-    assert take(box, folder) in ("ok", "bad-job")
+    assert not check(box).ok                    # was: RecursionError (Python 3.12 and newer)
+    assert take(box, folder) == "bad-job"
 
 
 def test_a_number_with_thousands_of_digits_is_read_as_javascript_reads_it(box):
@@ -197,15 +197,14 @@ def test_a_job_json_that_cannot_be_read_right_now_is_not_a_bad_job(box, monkeypa
     assert take(box, folder) == "not-complete"   # was: bad-job, a final "failed" for a job that was fine
 
 
-@pytest.mark.skipif(os.name == "nt", reason="NTFS takes 120 characters of any kind")
 def test_a_file_name_this_system_cannot_hold_is_a_bad_job_not_a_crash(box):
     folder = fresh_job(box)
     doc = json.loads((folder / "job.json").read_text("utf-8"))
-    doc["files"][0]["name"] = "漢" * 110 + ".hpscene"          # 338 bytes in UTF-8: too long for ext4 and APFS
+    doc["files"][0]["name"] = "\U0001f3e0" * 70 + ".hpscene"  # 288 bytes in UTF-8: too long for ext4 and APFS
     (folder / "job.json").write_text(json.dumps(doc), "utf-8")
-    assert take(box, folder) == "bad-job"        # was: OSError (File name too long)
+    assert take(box, folder) == "bad-job"        # was: OSError (File name too long); now the name rule says so (P3)
     rep = check(box)
-    assert any("cannot be used on this system" in e for e in rep.errors), rep.text()
+    assert any("longer than 255 bytes" in e for e in rep.errors), rep.text()
     assert not any(e.startswith("cannot be read") for e in rep.errors)   # the rest of the folder is still checked
 
 

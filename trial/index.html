@@ -295,7 +295,7 @@ function watchInbox() {
         let taken;
         try { taken = await box.take(MANIFESTS[SENDER], id); } catch (e) {
           if (e.code === 'not-complete') continue;
-          if (await box.claim(id, 'failed', { code: e.code, text: e.message })) log(`A job in this page's inbox was refused: ${e.code} ${e.message}`);
+          if (await box.refuse(id, e)) log(`A job in this page's inbox was refused: ${e.code} ${e.message}`);
           continue;
         }
         const { job, files } = taken, answers = job.reply_to && job.reply_to.job, c = current && answers === current.job ? current : null;
@@ -328,14 +328,18 @@ let watching = false;
 $('watch').onclick = async () => {
   watching = true; $('watch').hidden = true; $('stop').hidden = false;
   log('Started watching the inbox.');
-  try { for (const { id, status } of await box.unfinished()) { await box.writeStatus(id, 'failed', { code: 'error', text: 'The stand-in was closed while it worked on this' }); log(`Ended job ${id}, left "${status.state}" by an earlier run.`); } } catch (e) { fail('watchState', e); }
-  let lastAlive = 0, lastTick = performance.now(), worst = 0, other = false;
+  let lastAlive = 0, lastLeft = -1e9, lastTick = performance.now(), worst = 0, other = false;
   while (watching) {
     try {
       const gap = performance.now() - lastTick; lastTick = performance.now();
       if (gap > worst + 500 && gap > 3500) { worst = gap; log(`Chrome slowed this tab down: ${secs(gap)} between two looks at the inbox (tab ${document.hidden ? 'hidden' : 'visible'}).`); }
       if (performance.now() - lastAlive > 8000) { await box.alive('0.1'); lastAlive = performance.now(); }
       const mine = await box.exclusively(async () => {
+        if (performance.now() - lastLeft > 60000) {                   // at the start and once a minute: jobs nobody holds (6.3)
+          for (const { id, status } of await box.unfinished())
+            if (await box.takeUp(id, 'failed', { code: 'error', text: 'The stand-in was closed while it worked on this' })) log(`Ended job ${id}, left "${status.state}" by an earlier run.`);
+          lastLeft = performance.now();
+        }
         const ids = await box.pending();
         if (!ids.length) show('watchState', `Watching the inbox. ${document.hidden ? '' : 'Nothing there right now.'}`, 'good');
         for (const id of ids) await bake(id);
@@ -355,7 +359,7 @@ async function bake(id) {
   let taken;
   try { taken = await box.take(MANIFESTS[RECEIVER], id); } catch (e) {
     if (e.code === 'not-complete') return;
-    if (await box.claim(id, 'failed', { code: e.code, text: e.message })) log(`Refused job ${id}: ${e.code} ${e.message}`);
+    if (await box.refuse(id, e)) log(`Refused job ${id}: ${e.code} ${e.message}`);
     return;
   }
   const { job, files } = taken, t0 = performance.now(), total = Number($('bakeTime').value), house = files[0];

@@ -15,6 +15,8 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from datetime import datetime, timedelta  # noqa: E402
+
 from tbf import folder as F  # noqa: E402
 from tbf.check import check  # noqa: E402
 
@@ -104,13 +106,18 @@ def test_a_reply_the_sender_cannot_take_is_said_in_the_status(box):
     clean(box)
 
 
-def test_a_file_that_is_still_being_written_is_not_read(box):
+def test_a_file_shorter_longer_or_missing_is_a_bad_job(box):
+    """job.json is written last, so a file that is short or missing when it is there never comes (6.3, P20)"""
     me = F.read_tool(box, RENDER)
     job = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])
     folder = box / "tools" / RENDER / "inbox" / job
     whole = (folder / SCENE.name).read_bytes()
     (folder / SCENE.name).write_bytes(whole[:50])
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(F.JobProblem) as e:
+        F.take(box, me, folder)
+    assert e.value.code == "bad-job" and e.value.state == "failed"
+    (folder / SCENE.name).unlink()
+    with pytest.raises(F.JobProblem, match="is missing"):
         F.take(box, me, folder)
     (folder / SCENE.name).write_bytes(whole + b"x")
     with pytest.raises(F.JobProblem) as e:
@@ -130,14 +137,17 @@ def test_cancel_and_cleaning_up(box):
     F.write_status(box, RENDER, job, "cancelled", text="Stopped because the sender asked")
     clean(box)
     old = F.send(box, PLANNER, RENDER, "bake-house", [SCENE])            # never looked at
-    (box / "tools" / RENDER / "inbox" / "20260101-000000-abandon").mkdir()  # no job.json
+    inbox = box / "tools" / RENDER / "inbox"
+    (inbox / "20260101-000000-abandon").mkdir()                          # no job.json: dated by its newest file
+    (inbox / "20260101-000000-abandon" / "part.step").write_bytes(b"x")
+    (inbox / "20260101-000000-emptyjob").mkdir()                         # no files: perhaps being written right now
     now = time.time()
     F.clean(box, RENDER, at=now + 3600)
-    assert len(list((box / "tools" / RENDER / "inbox").iterdir())) == 3   # an hour later: all still there
+    assert len(list(inbox.iterdir())) == 4                               # an hour later: all still there
     F.clean(box, RENDER, at=now + 2 * F.DAY)
-    assert sorted(p.name for p in (box / "tools" / RENDER / "inbox").iterdir()) == sorted([old, "20260101-000000-abandon"])
+    assert sorted(p.name for p in inbox.iterdir()) == sorted([old, "20260101-000000-abandon", "20260101-000000-emptyjob"])
     F.clean(box, RENDER, at=now + 31 * F.DAY)
-    assert not list((box / "tools" / RENDER / "inbox").iterdir())
+    assert [p.name for p in inbox.iterdir()] == ["20260101-000000-emptyjob"]
 
 
 def test_the_stand_in_program_answers_a_job(tmp_path):
@@ -179,10 +189,12 @@ def test_jobs_left_from_an_earlier_run(box):
     F.claim(box, RENDER, a, "waiting")
     F.claim(box, RENDER, b, "working", fraction=0.5)
     F.claim(box, RENDER, c, "done")
-    left = {folder.name: st["state"] for folder, st in F.unfinished(box, RENDER)}
+    assert F.unfinished(box, RENDER) == []                               # fresh: another copy may hold them (P1)
+    later = datetime.now().astimezone() + timedelta(minutes=6)
+    left = {folder.name: st["state"] for folder, st in F.unfinished(box, RENDER, at=later)}
     assert left == {a: "waiting", b: "working"}
     (box / "tools" / RENDER / "inbox" / a / "status.json").write_bytes(b'{"format": "toolbox-st')   # half written
-    assert [f.name for f, _ in F.unfinished(box, RENDER)] == [b]          # read again at the next look, no crash
+    assert [f.name for f, _ in F.unfinished(box, RENDER, at=later)] == [b]   # read again at the next look, no crash
 
 
 def test_a_working_job_is_believed_for_five_minutes():
@@ -215,6 +227,12 @@ def test_the_stand_in_ends_what_an_earlier_run_left(tmp_path):
     F.write_manifest(root, manifest("nl.fresing.trial.receiver"))
     old = F.send(root, PLANNER, "nl.fresing.trial.receiver", "bake-house", [SCENE])
     F.claim(root, "nl.fresing.trial.receiver", old, "working", fraction=0.3)
+    held = F.send(root, PLANNER, "nl.fresing.trial.receiver", "bake-house", [SCENE])
+    F.claim(root, "nl.fresing.trial.receiver", held, "waiting")         # fresh: another copy may hold it
+    status = root / "tools" / "nl.fresing.trial.receiver" / "inbox" / old / "status.json"
+    doc = json.loads(status.read_text("utf-8"))
+    doc["updated"] = (datetime.now().astimezone() - timedelta(minutes=6)).isoformat(timespec="seconds")
+    status.write_text(json.dumps(doc), "utf-8")                          # nobody has written it for 6 minutes
     proc = subprocess.Popen([sys.executable, str(ROOT / "tools" / "standin.py"), "--folder", str(root), "--seconds", "1", "--once"],
                             stdout=subprocess.PIPE, text=True)
     try:
@@ -224,6 +242,7 @@ def test_the_stand_in_ends_what_an_earlier_run_left(tmp_path):
             time.sleep(0.1)
         st = F.read_status(root, "nl.fresing.trial.receiver", old)
         assert (st["state"], st["code"]) == ("failed", "error")
+        assert F.read_status(root, "nl.fresing.trial.receiver", held)["state"] == "waiting"
         F.send(root, PLANNER, "nl.fresing.trial.receiver", "bake-house", [SCENE])
         proc.communicate(timeout=30)
     finally:

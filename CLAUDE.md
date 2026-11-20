@@ -80,4 +80,14 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   opened. This is what .NET did; other tools (Python, Blender, Edge) were not tried, so the rule stays "refuse these names".
   A 311-character path was written, read and deleted, with "long paths" switched on (`LongPathsEnabled` = 1); with the
   `\\?\` prefix too. Not tested with long paths switched off. `ſ`/`s`, `µ`/`μ`, `ı`/`I` and `é` as one character or `e`+accent
-  are all different files on NTFS (two files each), so names are compared as written.
+  are all different files on NTFS (two files each). The format still takes each pair as one name, on purpose (0.2, 3.3:
+  stricter than Windows is safe).
+- From format 0.2 (task 0011, 20 Nov 2026): Python's `upper()` and Chrome's `toUpperCase()` differ for about 55
+  characters (Chrome 153 knows Unicode 16, Python 3.13 15.1, Python 3.11 14.0 – yet 3.11 to 3.13 agree with each other
+  on every character). So "the same name" uses `capitals()`: only characters below U+0590 whose capital is below
+  U+0590 too – the same in both for every character. NFC agrees on every character Python knows; it differs only for
+  20 characters of four scripts new in Unicode 16 (above U+105C0). `tests/test_web.py` checks all 1.1 million.
+- Taking a job over from another copy: "delete `status.json`, then create it exclusively" let 6 of 8 copies win
+  (a slow copy deleted a status another had just written). Moving it aside with a rename (only one copy can move one
+  file), comparing, and putting a wrong one back with a hard link (never over a newer one, and the same file even
+  while it is still being written) gave one winner in 1500 rounds of 8 copies.

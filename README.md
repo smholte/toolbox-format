@@ -77,7 +77,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\
 
 ## Versions
 
-**0.1** was reviewed by the leads of House Planner and Fresing Render on 18 Nov 2026 and is tagged `v0.1`. Tools pin
+**0.1** was reviewed by the leads of House Planner and Fresing Render on 18 Nov 2026 and is tagged `v0.1` (fixes:
+`v0.1.1`). **0.2** closes the rule problems of the first independent review and waits for the leads' review on the
+branch `task/0011-format-0.2`; what an app has to change is at the top of [`CHANGELOG.md`](CHANGELOG.md). Tools pin
 a tag and test against its samples. Until 1.0 anything may change between versions, and a tool reads only the version
 it was written for. How the format is changed: [`CLAUDE.md`](CLAUDE.md).
 

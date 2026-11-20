@@ -23,7 +23,7 @@
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+$",
-      "maxLength": 80
+      "maxLength": 60
     },
     "name": {
       "type": "string",
@@ -58,7 +58,7 @@
     "icon": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 120
+      "maxLength": 80
     },
     "start": {
       "type": "object",
@@ -116,7 +116,7 @@
             "items": {
               "type": "string",
               "pattern": "^(ext:[a-z0-9]{0,16}|[a-z0-9][a-z0-9-]{0,31}|[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+)$",
-              "maxLength": 80
+              "maxLength": 60
             },
             "uniqueItems": true,
             "maxItems": 100,
@@ -127,7 +127,7 @@
             "items": {
               "type": "string",
               "pattern": "^(ext:[a-z0-9]{0,16}|[a-z0-9][a-z0-9-]{0,31}|[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+)$",
-              "maxLength": 80
+              "maxLength": 60
             },
             "uniqueItems": true,
             "maxItems": 100
@@ -140,7 +140,7 @@
       "items": {
         "type": "string",
         "pattern": "^(ext:[a-z0-9]{0,16}|[a-z0-9][a-z0-9-]{0,31}|[a-z0-9]+(-[a-z0-9]+)*(\\.[a-z0-9]+(-[a-z0-9]+)*)+)$",
-        "maxLength": 80
+        "maxLength": 60
       },
       "uniqueItems": true,
       "maxItems": 100
@@ -155,5 +155,5 @@
       "uniqueItems": true
     }
   },
-  "description": "Checked beyond this schema by tbf/check.py: a web tool has no start, a native tool has no url; ids of actions and types are unique; every type named exists."
+  "description": "Checked beyond this schema by tbf/check.py: a web tool has no start, a native tool has no url; ids of actions and types are unique; every type named exists; the icon is a file name as in FORMAT.md 3.3; an own type is checked like a type of types.json and may not use head_matches."
 }

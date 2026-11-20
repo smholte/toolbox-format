@@ -1,6 +1,6 @@
 {
   "format": "toolbox-tool",
-  "version": "0.1",
+  "version": "0.2",
   "id": "nl.fresing.house-planner",
   "name": "House Planner",
   "app_version": "0.0.0-sample",

@@ -21,7 +21,7 @@
     },
     "job": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{7,63}$"
+      "pattern": "^[a-z0-9][a-z0-9-]{7,31}$"
     },
     "updated": {
       "type": "string",
@@ -51,7 +51,7 @@
     },
     "reply": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{7,63}$"
+      "pattern": "^[a-z0-9][a-z0-9-]{7,31}$"
     }
   }
 }

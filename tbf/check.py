@@ -17,8 +17,8 @@ from pathlib import Path
 import jsonschema
 
 from .detect import detect, load_types, type_problems
-from .names import (JOB_FILES, TIME_FIELDS, VERSION, JsonError, is_job_id, is_tool_id, is_type_ref, load_json,
-                    name_problem, time_problem)
+from .names import (JOB_FILES, TIME_FIELDS, VERSION, JsonError, capitals, is_job_id, is_tool_id, is_type_ref,
+                    load_json, name_problem, time_problem)
 
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 FOLDER_FILE = "toolbox-folder.json"
@@ -151,6 +151,16 @@ def check_types_file(path: Path, rep: Report) -> list[dict]:
 
 
 # ---------------------------------------------------------------- toolbox.json
+def _is_picture(p: Path) -> bool:
+    """a PNG (by its first bytes) or an SVG (an <svg in its first 4 KiB)"""
+    try:
+        with open(p, "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    return head.startswith(bytes.fromhex("89504e470d0a1a0a")) or b"<svg" in head
+
+
 def check_manifest(path: Path, rep: Report, builtin: list[dict], folder: str | None = None,
                    where: str | None = None, strict: bool = True) -> dict | None:
     where = where or path.name
@@ -206,6 +216,8 @@ def check_manifest(path: Path, rep: Report, builtin: list[dict], folder: str | N
             bad(f"icon: the file name {why}")
         elif not (path.parent / doc["icon"]).is_file():
             rep.warn(f"{where}: the icon {doc['icon']} is not next to the manifest")
+        elif not _is_picture(path.parent / doc["icon"]):
+            rep.warn(f"{where}: the icon {doc['icon']} is neither a PNG nor an SVG picture")
     if doc["actions"] and "inbox" not in doc.get("handover", []):
         rep.warn(f"{where}: it has actions but no \"inbox\" in handover, so nothing can be sent to it yet")
     return doc if ok else None
@@ -240,6 +252,10 @@ def check_job(folder: Path, rep: Report, types: list[dict], tool: dict | None = 
                   f"from is {job['from']}")
     if "reply_to" in job and "return" in job:
         rep.error(f"{at}: a reply job has no return")
+    status = None                               # read first: a job that is over may have lost its files (7.4)
+    if (folder / "status.json").is_file():
+        status = read_doc(folder / "status.json", "status-0", rep, f"{where}/status.json")
+    over = status is not None and status["state"] in FINAL
     if tools is not None:
         sender = tools.get(job["from"])
         if job["from"] not in tools:
@@ -259,10 +275,10 @@ def check_job(folder: Path, rep: Report, types: list[dict], tool: dict | None = 
         if why:
             rep.error(f"{at}: the file name {name!r} {why}")
             continue
-        if name.lower() in seen:
+        if capitals(name) in seen:
             rep.error(f"{at}: the file {name} is listed twice (capitals do not count)")
             continue
-        seen.add(name.lower())
+        seen.add(capitals(name))
         p = folder / name
         kind, size = look(p)
         if kind == "bad-name":
@@ -270,6 +286,8 @@ def check_job(folder: Path, rep: Report, types: list[dict], tool: dict | None = 
             continue
         if kind == "unreadable":
             rep.error(f"{where}: the file {name} cannot be read ({size})")
+            continue
+        if kind == "missing" and over:          # cleaned up after a final status (7.4): not a fault
             continue
         if kind != "file":
             rep.error(f"{where}: the file {name} is missing" if kind == "missing" else
@@ -290,22 +308,27 @@ def check_job(folder: Path, rep: Report, types: list[dict], tool: dict | None = 
             rep.warn(f"{where}/{name}: {note}")
         if action is not None and f["type"] not in action["accepts"]:
             rep.error(f"{at}: the action {action['id']} does not accept {f['type']} ({name})")
-    for doc_name, schema in (("status.json", "status-0"), ("cancel.json", "cancel-0")):
-        if (folder / doc_name).is_file():
-            doc = read_doc(folder / doc_name, schema, rep, f"{where}/{doc_name}")
-            if doc is None:
-                continue
-            if doc["job"] != job["job"]:
-                rep.error(f"{where}/{doc_name}: is about the job {doc['job']}, not this one")
-            if doc_name == "status.json":
-                if "code" in doc and doc["state"] != "failed":
-                    rep.warn(f"{where}/status.json: a code only says why a job failed; the state is {doc['state']}")
-                if "reply" in doc and doc["state"] != "done":
-                    rep.warn(f"{where}/status.json: a reply belongs to a job that is done; the state is {doc['state']}")
-                if "reply" in doc and "return" not in job:
-                    rep.warn(f"{where}/status.json: names a reply, but the job asked for none (no return)")
+    cancel = read_doc(folder / "cancel.json", "cancel-0", rep, f"{where}/cancel.json") \
+        if (folder / "cancel.json").is_file() else None
+    for doc_name, doc in (("status.json", status), ("cancel.json", cancel)):
+        if doc is None:
+            continue
+        if doc["job"] != job["job"]:
+            rep.error(f"{where}/{doc_name}: is about the job {doc['job']}, not this one")
+        if doc_name == "status.json":
+            if "code" in doc and doc["state"] != "failed":
+                rep.warn(f"{where}/status.json: a code only says why a job failed; the state is {doc['state']}")
+            if doc["state"] == "failed" and "code" not in doc:
+                rep.warn(f"{where}/status.json: a failed job has a code (7.1); readers take it as error")
+            if "fraction" in doc and doc["state"] != "working":
+                rep.warn(f"{where}/status.json: a fraction belongs to a job that is working; the state is "
+                         f"{doc['state']}")
+            if "reply" in doc and doc["state"] != "done":
+                rep.warn(f"{where}/status.json: a reply belongs to a job that is done; the state is {doc['state']}")
+            if "reply" in doc and "return" not in job:
+                rep.warn(f"{where}/status.json: names a reply, but the job asked for none (no return)")
     for entry in sorted(folder.iterdir(), key=lambda e: e.name):
-        if entry.name.lower() in seen or entry.name in JOB_FILES:
+        if capitals(entry.name) in seen or entry.name in JOB_FILES:
             continue
         rep.warn(f"{where}: {entry.name} is not named by job.json")
 
@@ -328,11 +351,12 @@ def check_folder(root: Path, rep: Report):
         if not d.is_dir():
             rep.warn(f"{at}: only tool folders belong in tools/")
             continue
-        if not is_tool_id(d.name):
-            rep.error(f"{at}: not a tool id (lower case, at least two parts with dots, like nl.fresing.render)")
+        if not is_tool_id(d.name):              # 2: a reader ignores entries it does not know
+            rep.warn(f"{at}: not a tool id (lower case, at least two parts with dots, like nl.fresing.render), so "
+                     "readers ignore it")
             continue
         if not (d / "toolbox.json").is_file():
-            rep.error(f"{at}: no toolbox.json")
+            rep.warn(f"{at}: no toolbox.json – not there yet, or left behind")
             tools[d.name] = None
             continue
         tools[d.name] = check_manifest(d / "toolbox.json", rep, builtin, folder=d.name, where=f"{at}/toolbox.json")
@@ -360,7 +384,7 @@ def check_folder(root: Path, rep: Report):
             if not j.is_dir():
                 rep.warn(f"{jat}: only job folders belong in an inbox")
             elif not is_job_id(j.name):
-                rep.error(f"{jat}: not a job id (8 to 64 of a–z, 0–9 and -)")
+                rep.warn(f"{jat}: not a job id (8 to 32 of a–z, 0–9 and -), so readers ignore it")
             elif tool is None:
                 rep.warn(f"{jat}: not checked – the tool's manifest is broken")
             else:

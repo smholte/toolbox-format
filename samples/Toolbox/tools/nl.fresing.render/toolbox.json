@@ -1,6 +1,6 @@
 {
   "format": "toolbox-tool",
-  "version": "0.1",
+  "version": "0.2",
   "id": "nl.fresing.render",
   "name": "Fresing Render",
   "app_version": "0.0.0-sample",

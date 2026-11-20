@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "samples"
-V = "0.1"
+V = "0.2"
 RENDER, PLANNER = "nl.fresing.render", "nl.fresing.house-planner"
 JOB1, JOB2, REPLY1 = "20261118-195100-9f3c2a", "20261118-203000-c81e55", "20261118-201500-4b7d10"
 

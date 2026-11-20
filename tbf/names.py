@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 
-VERSION = "0.1"                       # the version this code reads; until 1.0 no other one (section 3.5)
+VERSION = "0.2"                       # the version this code reads; until 1.0 no other one (section 3.5)
 MAX_JSON = 2**20                      # bytes of a toolbox JSON file
+MAX_DEPTH = 64                        # objects and arrays inside each other in a toolbox JSON file (3.4)
+MAX_TOOL_ID = 60                      # characters (3.1) – with the job id and the file name, a path stays under 260
+MAX_NAME = 80                         # characters of a file name (3.3) ...
+MAX_NAME_BYTES = 255                  # ... and bytes in UTF-8 (Linux and macOS hold no more)
 
 TOOL_ID = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*(\.[a-z0-9]+(-[a-z0-9]+)*)+")
-JOB_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,63}")
+JOB_ID = re.compile(r"[a-z0-9][a-z0-9-]{7,31}")
 TYPE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 ACTION_ID = TYPE_ID
 EXT = re.compile(r"\.[a-z0-9]{1,16}")
@@ -17,12 +22,16 @@ TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]([01]\
 TIME_FIELDS = ("created", "updated", "asked", "seen")             # the times of the format's files
 
 JOB_FILES = ("job.json", "status.json", "cancel.json")          # the format's own files in a job folder
-_WINDOWS = {"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+# names Windows keeps for devices, as the part of a name before its first dot (3.3) – a rule of the format, so a name
+# is refused even where a system would take it (task 0010 of smholte/ToolBox)
+DEVICES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"} | {
+    f"{d}{n}" for d in ("COM", "LPT") for n in "0123456789\u00b9\u00b2\u00b3"}
 _BAD = set('<>:"/\\|?*')
+_CAPITALS_BELOW = 0x590               # Latin, Greek, Cyrillic, Armenian: the scripts whose capitals every version agrees on
 
 
 def is_tool_id(s) -> bool:
-    return isinstance(s, str) and len(s) <= 80 and TOOL_ID.fullmatch(s) is not None
+    return isinstance(s, str) and len(s) <= MAX_TOOL_ID and TOOL_ID.fullmatch(s) is not None
 
 
 def is_job_id(s) -> bool:
@@ -45,12 +54,28 @@ def is_type_ref(s, builtin: set[str]) -> str | None:
     return "builtin" if s in builtin else None
 
 
+def capitals(s: str) -> str:
+    """the text two file names are compared by (3.3): every character below U+0590 whose capital is below U+0590 too
+    becomes that capital (ſ and s, µ and μ, ı and I are then the same); every other character stays as written.
+    Plain upper() is not used: Python and the browsers know different Unicode versions, and from U+0590 on (and for
+    a few letters below it, like ƛ) they give different capitals."""
+    out = []
+    for c in s:
+        u = c.upper() if ord(c) < _CAPITALS_BELOW else c
+        out.append(u if all(ord(x) < _CAPITALS_BELOW for x in u) else c)
+    return "".join(out)
+
+
 def name_problem(name) -> str | None:
     """why ``name`` is not a file name every system and every tool can take (section 3.3); None when it is"""
     if not isinstance(name, str) or not name:
         return "is empty"
-    if len(name) > 120:
-        return "is longer than 120 characters"
+    if len(name) > MAX_NAME:
+        return f"is longer than {MAX_NAME} characters"
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in name):
+        return "is not UTF-8 text (an unpaired \\ud800–\\udfff)"
+    if len(name.encode("utf-8")) > MAX_NAME_BYTES:
+        return f"is longer than {MAX_NAME_BYTES} bytes in UTF-8"
     if any(ord(c) < 32 or ord(c) == 127 for c in name):
         return "holds a control character"
     bad = sorted(_BAD & set(name))
@@ -58,9 +83,11 @@ def name_problem(name) -> str | None:
         return f"holds {bad[0]!r}"
     if name[0] in " ." or name[-1] in " .":
         return "starts or ends with a space or a dot"
-    if name.split(".")[0].lower() in _WINDOWS:
-        return "is a name Windows keeps for itself"
-    if name.lower() in JOB_FILES:
+    if unicodedata.normalize("NFC", name) != name:
+        return "is not in Unicode NFC form (an é must be one character, not e and an accent)"
+    if capitals(name.split(".")[0].rstrip(" ")) in DEVICES:
+        return "is a name Windows keeps for a device"
+    if capitals(name) in {capitals(n) for n in JOB_FILES}:
         return "is one of the format's own files"
     return None
 
@@ -113,10 +140,13 @@ def _text_problem(s: str) -> str | None:
 
 
 def _text_at(doc) -> tuple[str, str] | None:
-    """(where, why) of the first key or text that breaks section 3.4, walking without recursion"""
-    todo = [("", doc)]
+    """(where, why) of the first key or text that breaks section 3.4, or of the first object or array nested deeper
+    than 64 levels (the file's own object is level 1) – walking without recursion"""
+    todo = [("", doc, 1)]
     while todo:
-        where, x = todo.pop()
+        where, x, depth = todo.pop()
+        if isinstance(x, (dict, list)) and depth > MAX_DEPTH:
+            return where, f"is nested deeper than {MAX_DEPTH} levels"
         if isinstance(x, str):
             why = _text_problem(x)
             if why:
@@ -126,15 +156,16 @@ def _text_at(doc) -> tuple[str, str] | None:
                 why = _text_problem(k)
                 if why:
                     return f"{where}/{k}", why
-                todo.append((f"{where}/{k}", v))
+                todo.append((f"{where}/{k}", v, depth + 1))
         elif isinstance(x, list):
-            todo.extend((f"{where}/{i}", v) for i, v in reversed(list(enumerate(x))))
+            todo.extend((f"{where}/{i}", v, depth + 1) for i, v in reversed(list(enumerate(x))))
     return None
 
 
 def load_json(data: bytes, keys_twice: str = "refuse") -> dict:
     """a toolbox JSON file as an object, or JsonError: UTF-8 without a byte-order mark, one object, no key twice,
-    no NaN or Infinity, no control characters and nothing that is not UTF-8 in any text (section 3.4).
+    no NaN or Infinity, no control characters and nothing that is not UTF-8 in any text, at most 64 levels deep
+    (section 3.4).
     ``keys_twice="last"``: a key written twice is not refused but the last one counts, as in JavaScript – for
     readers, which need not notice it (3.4); the checker refuses it."""
     if len(data) > MAX_JSON:
@@ -146,8 +177,8 @@ def load_json(data: bytes, keys_twice: str = "refuse") -> dict:
                          parse_constant=_const, parse_int=_number)
     except UnicodeDecodeError:
         raise JsonError("is not UTF-8") from None
-    except RecursionError:
-        raise JsonError("is nested too deep") from None
+    except RecursionError:                      # Python 3.11 stops near 1000 levels; 3.4 allows 64
+        raise JsonError(f"is nested deeper than {MAX_DEPTH} levels") from None
     except json.JSONDecodeError as e:
         raise JsonError(f"is not JSON ({e.msg}, line {e.lineno})") from None
     if not isinstance(doc, dict):

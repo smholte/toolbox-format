@@ -33,6 +33,10 @@ def _set_problem(p: str, i: int) -> tuple[int, str | None]:
         return i, "has an empty [] group"
     items = []                                   # (text, is a class like \d)
     while i < len(p) and p[i] != "]":
+        if p[i] == "[":                          # Python warns that these will mean something else one day (P9)
+            return i, "has a [ inside a set (write \\[)"
+        if p[i] in "-&|~" and p[i + 1:i + 2] == p[i]:
+            return i, f"has {p[i] * 2} inside a set (Python will read it as a set operation one day)"
         if p[i] == "\\":
             nxt = p[i + 1:i + 2]
             if not nxt:
@@ -138,10 +142,22 @@ def rule_problems(rule, where: str, depth: int = 1) -> list[str]:
         if not isinstance(v, dict) or set(v) != want or not all(isinstance(x, str) and x for x in v.values()):
             return [f"{where}/{key}: needs exactly {', '.join(sorted(want))} (texts)"]
         f = v["file"]
+        if not all(32 <= ord(c) < 127 for c in f):
+            return [f"{where}/{key}: the name of a file inside a zip is plain ASCII (5.2)"]
         if f.startswith("/") or "\\" in f or any(part in ("", ".", "..") for part in f.split("/")):
             return [f"{where}/{key}: {f!r} is not a plain path inside a zip"]
         return []
     return [f"{where}: {key!r} is not a rule this version knows"]
+
+
+def _uses_pattern(rule) -> bool:
+    """a valid rule holds a head_matches somewhere (rules are at most 4 deep)"""
+    (key, v), = rule.items()
+    if key in ("all", "any"):
+        return any(_uses_pattern(r) for r in v)
+    if key == "not":
+        return _uses_pattern(v)
+    return key == "head_matches"
 
 
 def type_problems(t, where: str, own: bool) -> list[str]:
@@ -166,7 +182,11 @@ def type_problems(t, where: str, own: bool) -> list[str]:
             and len(set(exts)) == len(exts)):
         out.append(f"{where}/extensions: at least one extension like \".step\" (lower case, with its dot), none twice")
     if "detect" in t:
-        out += rule_problems(t["detect"], f"{where}/detect")
+        problems = rule_problems(t["detect"], f"{where}/detect")
+        out += problems
+        if own and not problems and _uses_pattern(t["detect"]):
+            out.append(f"{where}/detect: a tool's own type may not use head_matches – a careless pattern can take "
+                       "minutes and would stall every tool; only the built-in list may (5.1)")
     if "by_content" in t and not isinstance(t["by_content"], bool):
         out.append(f"{where}/by_content: true or false")
     if t.get("by_content") and "detect" not in t:

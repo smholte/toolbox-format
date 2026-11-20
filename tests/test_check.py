@@ -65,7 +65,7 @@ def test_one_manifest_and_one_job_alone():
 def test_command_line(box):
     r = subprocess.run([sys.executable, str(ROOT / "check.py"), str(box)], capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout.strip().endswith("OK")
-    (job(box) / "sample-house.hpscene").unlink()
+    (job(box, j=JOB2) / "sample-house.hpscene").unlink()
     r = subprocess.run([sys.executable, str(ROOT / "check.py"), str(box)], capture_output=True, text=True)
     assert r.returncode == 1 and "is missing" in r.stdout
     r = subprocess.run([sys.executable, str(ROOT / "check.py"), "--type", str(SAMPLES / "files" / "sample-part.step")],
@@ -75,8 +75,8 @@ def test_command_line(box):
 
 # ---------------------------------------------------------------- broken manifests
 MANIFEST_BREAKS = {
-    "another version": (lambda d: d.update(version="0.2"), "this checker reads 0.1 only"),
-    "a newer major": (lambda d: d.update(version="1.0"), "this checker reads 0.1 only"),
+    "another version": (lambda d: d.update(version="0.1"), "this checker reads 0.2 only"),
+    "a newer major": (lambda d: d.update(version="1.0"), "this checker reads 0.2 only"),
     "wrong format": (lambda d: d.update(format="toolbox-job"), "'toolbox-tool' was expected"),
     "id is not the folder": (lambda d: d.update(id="nl.fresing.other"), "but its folder is named"),
     "id with capitals": (lambda d: d.update(id="NL.Fresing.Render"), "does not match"),
@@ -137,7 +137,7 @@ def test_own_type_is_used_for_jobs(box):
     j.mkdir()
     (j / "part.wdg").write_bytes(b"WIDGET 1\n")
     (j / "job.json").write_text(json.dumps({
-        "format": "toolbox-job", "version": "0.1", "job": j.name, "created": "2026-11-18T21:00:00+01:00",
+        "format": "toolbox-job", "version": "0.2", "job": j.name, "created": "2026-11-18T21:00:00+01:00",
         "from": PLANNER, "to": RENDER, "action": "import-step",
         "files": [{"name": "part.wdg", "type": "com.example.widget", "size": 9}]}), "utf-8")
     assert check(box).items == [], check(box).text()
@@ -153,9 +153,10 @@ def test_folder_level_problems(box):
     (box / "tools" / RENDER / "inbox" / "short").mkdir()
     (box / "tools" / RENDER / "inbox" / "20261118-220000-bbbbbb").mkdir()
     rep = check(box)
-    assert any("tools/Not A Tool: not a tool id" in e for e in rep.errors)
-    assert any("tools/com.example.empty: no toolbox.json" in e for e in rep.errors)
-    assert any("inbox/short: not a job id" in e for e in rep.errors)
+    assert rep.ok, rep.text()                     # 2: a reader ignores entries it does not know (P27)
+    assert any("tools/Not A Tool: not a tool id" in w for w in rep.warnings)
+    assert any("tools/com.example.empty: no toolbox.json" in w for w in rep.warnings)
+    assert any("inbox/short: not a job id" in w for w in rep.warnings)
     assert any("notes.txt" in w for w in rep.warnings)
     assert any("outbox" in w for w in rep.warnings)
     assert any("20261118-220000-bbbbbb: no job.json" in w for w in rep.warnings)
@@ -179,22 +180,23 @@ JOB_BREAKS = {
     "wrong type": (lambda d: d["files"][0].update(type="hpbake"), "calls it hpbake, but it is hpscene"),
     "missing file": (lambda d: d["files"][0].update(name="other.hpscene"), "the file other.hpscene is missing"),
     "path in a name": (lambda d: d["files"][0].update(name="../sample-house.hpscene"), "holds '/'"),
-    "windows name": (lambda d: d["files"][0].update(name="nul.hpscene"), "Windows keeps for itself"),
+    "windows name": (lambda d: d["files"][0].update(name="nul.hpscene"), "Windows keeps for a device"),
     "own file as payload": (lambda d: d["files"][0].update(name="status.json"), "one of the format's own files"),
     "listed twice": (lambda d: d["files"].append(dict(d["files"][0], name="SAMPLE-HOUSE.hpscene")), "listed twice"),
     "return the sender lacks": (lambda d: d.update({"return": "import-step"}), "which the sender"),
     "reply from somebody else": (lambda d: d.update(reply_to={"tool": "nl.fresing.other", "job": JOB2}),
                                  "a reply comes from the tool that did the job"),
-    "reply that asks for a reply": (lambda d: d.update(reply_to={"tool": PLANNER, "job": JOB2}), "a reply job has no return"),
+    "reply that asks for a reply": (lambda d: d.update(reply_to={"tool": PLANNER, "job": JOB1}), "a reply job has no return"),
     "unknown field": (lambda d: d.update(priority=1), "Additional properties"),
-    "another version": (lambda d: d.update(version="0.3"), "this checker reads 0.1 only"),
+    "another version": (lambda d: d.update(version="0.3"), "this checker reads 0.2 only"),
 }
 
 
 @pytest.mark.parametrize("name", JOB_BREAKS)
 def test_broken_job(box, name):
+    """on the job that is being baked: a job whose status is final may have lost its files (7.4)"""
     change, expect = JOB_BREAKS[name]
-    edit(job(box) / "job.json", change)
+    edit(job(box, j=JOB2) / "job.json", change)
     rep = check(box)
     assert not rep.ok and any(expect in e for e in rep.errors), rep.text()
 
@@ -280,12 +282,12 @@ def test_broken_json_file_is_an_error_not_a_crash(box):
 
 # ---------------------------------------------------------------- names and times
 @pytest.mark.parametrize("name", ["", "a/b", "a\\b", "..", ".hidden", "trailing.", "trailing ", " leading", "con",
-                                  "COM1.step", "a:b", "what?.step", "x" * 121, "tab\there", "job.json", "Status.JSON"])
+                                  "COM1.step", "a:b", "what?.step", "x" * 81, "tab\there", "job.json", "Status.JSON"])
 def test_bad_names(name):
     assert name_problem(name)
 
 
-@pytest.mark.parametrize("name", ["part.step", "Hus – versjon 3.hpscene", "a.b.c.tar.gz", "console.step", "x" * 120])
+@pytest.mark.parametrize("name", ["part.step", "Hus – versjon 3.hpscene", "a.b.c.tar.gz", "console.step", "x" * 80])
 def test_good_names(name):
     assert name_problem(name) is None
 

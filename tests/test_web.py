@@ -8,7 +8,6 @@ import functools
 import http.server
 import json
 import random
-import re
 import shutil
 import sys
 import threading
@@ -163,8 +162,8 @@ def test_detect_type_is_the_same_in_javascript_and_python(page, tmp_path):
 
 def test_names_times_patterns_and_rules_are_judged_the_same(page):
     names = ["", "a/b", "a\\b", "..", ".hidden", "trailing.", "trailing ", " leading", "con", "COM1.step", "a:b", "what?.step",
-             "x" * 121, "x" * 120, "tab\there", "job.json", "Status.JSON", "part.step", "Hus – versjon 3.hpscene",
-             "a.b.c.tar.gz", "console.step", "\U0001f3e0" * 120, "\U0001f3e0" * 121, "nul", "lpt9.txt", "a|b", 'a"b', "a*"]
+             "x" * 81, "x" * 80, "tab\there", "job.json", "Status.JSON", "part.step", "Hus – versjon 3.hpscene",
+             "a.b.c.tar.gz", "console.step", "\U0001f3e0" * 63, "\U0001f3e0" * 64, "nul", "lpt9.txt", "a|b", 'a"b', "a*"]
     times = ["2026-11-18T19:51:00+01:00", "2026-11-18T18:51:00Z", "2026-11-18T19:51:00.250+01:00", "2026-11-18 19:51:00",
              "2026-11-18T19:51:00", "2026-13-01T00:00:00Z", "2026-02-30T10:00:00+01:00", "2024-02-29T10:00:00Z",
              "2026-02-29T10:00:00Z", "2026-11-18T24:00:00Z", "2026-11-18T19:60:00Z", "2026-11-18T19:51:61Z",
@@ -263,7 +262,7 @@ def test_python_sends_browser_takes(page, tmp_path):
 
 
 BAD_JOBS = {
-    "another version": lambda d: d.update(version="0.2"),
+    "another version": lambda d: d.update(version="0.1"),
     "unknown field": lambda d: d.update(priority=1),
     "job is not the folder": lambda d: d.update(job="20261118-195100-000000"),
     "for another tool": lambda d: d.update(to="nl.fresing.other"),
@@ -313,7 +312,7 @@ def test_a_folder_that_is_not_the_toolbox_folder(page):
     page.evaluate("harness.load({'notes.txt': 'eA=='})")
     r = page.evaluate("harness.tried(async () => { await harness.box('nl.fresing.house-planner'); })")
     assert r.get("code") == "not-toolbox", r
-    page.evaluate("t => harness.load(t)", {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.2"}')})
+    page.evaluate("t => harness.load(t)", {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.1"}')})
     r = page.evaluate("harness.tried(async () => { await harness.box('nl.fresing.house-planner'); })")
     assert r.get("code") == "version", r
 
@@ -358,14 +357,16 @@ def test_claim_leftovers_and_a_stalled_job(page, tmp_path):
     a = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", scene])
     page.wait_for_timeout(1100)                                          # job ids carry the second
     b = page.evaluate(SEND, [PLANNER, RENDER, "sample-house.hpscene", scene])
-    got = page.evaluate("""async ([me, a, b]) => { const box = await harness.box(me);
+    got = page.evaluate("""async ([me, a, b]) => { const box = await harness.box(me), later = Date.now() + 6 * 60000;
       const first = await box.claim(a, 'waiting', { text: 'Waiting for you' }), second = await box.claim(a, 'working');
       await box.claim(b, 'done');
-      return [first, second, (await box.unfinished()).map(x => [x.id, x.status.state]), await box.pending()]; }""", [RENDER, a, b])
-    assert got == [True, False, [[a, "waiting"]], []]
+      return [first, second, (await box.unfinished()).length, (await box.unfinished(later)).map(x => [x.id, x.status.state]), await box.pending()]; }""", [RENDER, a, b])
+    assert got == [True, False, 0, [[a, "waiting"]], []]
     out = dump_and_check(page, tmp_path)
-    assert [(f.name, st["state"]) for f, st in F.unfinished(out, RENDER)] == [(a, "waiting")]
     from datetime import datetime, timedelta, timezone
+    assert F.unfinished(out, RENDER) == []
+    later = datetime.now().astimezone() + timedelta(minutes=6)
+    assert [(f.name, st["state"]) for f, st in F.unfinished(out, RENDER, at=later)] == [(a, "waiting")]
     at = datetime(2026, 11, 18, 20, 0, 0, tzinfo=timezone.utc)
     cases = [{"state": s, "updated": (at - timedelta(seconds=ago)).isoformat(timespec="seconds")}
              for s in ("working", "waiting", "done") for ago in (0, 299, 301, 9999)] + [None, {"state": "working"}]
@@ -377,7 +378,7 @@ def test_a_broken_or_newer_manifest_of_another_tool(page):
     tree = manifests_only()
     key = f"tools/{RENDER}/toolbox.json"
     doc = json.loads(base64.b64decode(tree[key]))
-    for change, code in ((lambda d: d.update(version="0.2"), "version"), (lambda d: d.update(colour="red"), "json"),
+    for change, code in ((lambda d: d.update(version="0.1"), "version"), (lambda d: d.update(colour="red"), "json"),
                          (lambda d: d["actions"][0].update(accepts=["stepp"]), "json")):
         d = json.loads(json.dumps(doc))
         change(d)
@@ -388,9 +389,14 @@ def test_a_broken_or_newer_manifest_of_another_tool(page):
 
 
 # ---------------------------------------------------------------- the trial page (trial/index.html)
+# The folder as {path: base64}. Another tab may be writing (a browser writes beside a file, in "<name>.crswap", and
+# swaps it in when it closes): such files, and files that vanish while the folder is read, are not part of it.
 DUMP = """async () => { const out = {}; const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 8192) s += String.fromCharCode(...bytes.subarray(i, i + 8192)); return btoa(s); };
-  const walk = async (dir, pre) => { for await (const [name, h] of dir.entries()) { if (h.kind === 'directory') await walk(h, pre + name + '/'); else out[pre + name] = b64(new Uint8Array(await (await h.getFile()).arrayBuffer())); } };
+  const gone = e => e && e.name === 'NotFoundError';
+  const walk = async (dir, pre) => { for await (const [name, h] of dir.entries()) { if (name.endsWith('.crswap')) continue;
+    try { if (h.kind === 'directory') await walk(h, pre + name + '/'); else out[pre + name] = b64(new Uint8Array(await (await h.getFile()).arrayBuffer())); } catch (e) { if (!gone(e)) throw e; } } };
   await walk(await (await navigator.storage.getDirectory()).getDirectoryHandle('Toolbox'), ''); return out; }"""
+IDLE = "!document.getElementById('send').disabled"      # the sender page has finished with its job, removing included
 
 
 def test_the_trial_page_does_a_round_trip(page, tmp_path):
@@ -423,6 +429,9 @@ def test_the_trial_page_does_a_round_trip(page, tmp_path):
         sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Baking moment')", timeout=15000)
         sender.click("#cancel")
         sender.wait_for_function("document.getElementById('sendState').textContent.startsWith('Cancelled')", timeout=15000)
+        sender.wait_for_function(IDLE, timeout=15000)               # it removes the cancelled job after saying so
+        receiver.click("#stop")                                     # nothing else writes while the folder is read
+        receiver.wait_for_function("!document.getElementById('watch').hidden", timeout=15000)
         # a bake that answers a job this browser did not send is left alone, for another copy
         box = tmp_path / "Toolbox2"
         write_tree(sender.evaluate(DUMP), box)
@@ -538,10 +547,10 @@ def test_review_zips_are_named_the_same(page, tmp_path):
 
 
 def test_review_own_types_written_in_another_key_order_are_the_same_type(page, tmp_path):
-    tree = {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.1"}')}
+    tree = {"toolbox-folder.json": b64(b'{"format":"toolbox-folder","version":"0.2"}')}
     for tid, own in (("com.example.a", {"id": "com.example.w", "name": "W", "extensions": [".w"]}),
                      ("com.example.b", {"name": "W", "extensions": [".w"], "id": "com.example.w"})):
-        m = {"format": "toolbox-tool", "version": "0.1", "id": tid, "name": tid, "kind": "native", "actions": [], "types": [own]}
+        m = {"format": "toolbox-tool", "version": "0.2", "id": tid, "name": tid, "kind": "native", "actions": [], "types": [own]}
         tree[f"tools/{tid}/toolbox.json"] = b64(json.dumps(m).encode())
     write_tree(tree, tmp_path / "Toolbox")
     page.evaluate("t => harness.load(t)", tree)
@@ -619,3 +628,249 @@ def test_review_a_job_json_held_by_another_program_is_read_later(page):
       FileSystemFileHandle.prototype.getFile = function () { if (this.name === 'job.json') return Promise.reject(new DOMException('held', 'NotReadableError')); return real.call(this); };
       try { return await harness.tried(() => box.take(m, id).then(() => 'ok')); } finally { FileSystemFileHandle.prototype.getFile = real; } }""", [RENDER, JOB1])
     assert r.get("code") == "not-complete", r
+
+
+# ---------------------------------------------------------------- format 0.2 (task 0011 of smholte/ToolBox)
+# Every new rule both languages judge, case by case. The Python-only broken copies are in tests/test_format_0_2.py.
+import time  # noqa: E402
+import unicodedata  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from tbf.detect import type_problems  # noqa: E402
+from tbf.names import capitals  # noqa: E402
+
+JOB2 = "20261118-203000-c81e55"
+W1 = ["con .txt", "COM0.txt", "LPT0.txt", "COM¹.txt", "COM².txt", "COM³.txt", "LPT¹.txt", "LPT².txt",
+      "LPT³.txt", "CONIN$", "CONOUT$", "CLOCK$", "con.txt.txt", "aux"]
+
+
+def test_0_2_names_are_judged_the_same(page):
+    names = W1 + ["Con", "prn  .x", "com10.txt", "console.step", "lpt⁴.txt", "CONIN", "x" * 80, "x" * 81,
+                  "\U0001f3e0" * 63 + ".a", "\U0001f3e0" * 64, "é" * 80, "é.txt", "Å.txt", "Å.txt",
+                  "Job.Json", "ſtatus.json", "ſ.txt", "\ud800.txt", "a\udc00", "Hus på hytta.hpscene",
+                  "İ.txt", "K.txt", "ა.txt"]
+    js = page.evaluate("ns => ns.map(n => ToolboxFolder.nameProblem(n) === null)", names)
+    assert js == [name_problem(n) is None for n in names], [(n, a) for n, a in zip(names, js) if a != (name_problem(n) is None)]
+    assert js.count(True) == 12          # \u212a (Kelvin) is not NFC: NFC makes it K
+
+
+def test_0_2_capitals_are_the_same_for_every_character(page):
+    """names are compared by capitals() (3.3); plain upper() differs between Python 3.11–3.13 and Chrome for about
+    55 characters (capitals new in Unicode 16), capitals() for none"""
+    js = page.evaluate("""() => { const out = {}; for (let cp = 0; cp < 0x110000; cp++) { if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const c = String.fromCodePoint(cp), k = ToolboxFolder.capitals(c); if (k !== c) out[cp] = k; } return out; }""")
+    py = {str(cp): capitals(chr(cp)) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF and capitals(chr(cp)) != chr(cp)}
+    assert js == py
+    assert len(py) > 400 and py[str(0x17F)] == "S" and py[str(0xB5)] == "Μ" and py[str(0x131)] == "I"
+
+
+def test_0_2_nfc_is_judged_the_same_for_every_character_python_knows(page):
+    """A name must be NFC (3.3). Chrome knows a newer Unicode than Python; the only differences allowed are
+    sequences that make a character Python does not know yet (Unicode 16: Todhri, Tulu-Tigalari, Gurung Khema,
+    Kirat Rai – 20 characters, all above U+105C0)."""
+    js = page.evaluate("""() => { const single = [], seq = []; for (let cp = 0; cp < 0x110000; cp++) { if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const c = String.fromCodePoint(cp); if (c.normalize('NFC') !== c) single.push(cp);
+      const d = c.normalize('NFD'); if (d !== c) seq.push([cp, d, d.normalize('NFC') === d]); } return [single, seq]; }""")
+    single = [cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF and unicodedata.normalize("NFC", chr(cp)) != chr(cp)]
+    assert js[0] == single
+    differ = [cp for cp, d, ok in js[1] if (unicodedata.normalize("NFC", d) == d) != ok]
+    assert all(unicodedata.category(chr(cp)) == "Cn" and cp > 0x10000 for cp in differ), [hex(c) for c in differ]
+    assert len(js[1]) > 2000
+
+
+def test_0_2_json_depth_is_judged_the_same(page):
+    deep = lambda n: b'{"a":' * (n - 1) + b"{}" + b"}" * (n - 1)          # noqa: E731
+    cases = [deep(64), deep(65), b'{"a":' + b"[" * 63 + b"1" + b"]" * 63 + b"}", b'{"a":' + b"[" * 64 + b"1" + b"]" * 64 + b"}",
+             deep(2000), b'{"a":[[],[[{}]]]}']
+    js = page.evaluate("cs => cs.map(c => { try { ToolboxFolder.parseJson(unb64(c)); return true; } catch (e) { return e.code; } })",
+                       [b64(c) for c in cases])
+    py = []
+    for c in cases:
+        try:
+            load_json(c, "last")
+            py.append(True)
+        except JsonError:
+            py.append("json")
+    assert js == py == [True, "json", True, "json", "json", True]
+
+
+def test_0_2_patterns_rules_and_own_types_are_judged_the_same(page):
+    rnd = random.Random(5)
+    alphabet = list("ab[]^-&|~\\d(){}*+?2,.$") + ["\\[", "\\]", "\\-"]
+    patterns = ["[[a]", "[^[]", "[a[b]", "[a--b]", "[%--]", "[a&&b]", "[&&]", "[a||b]", "[~~]", "[a~~b]", "[\\[]", "[-]",
+                "[!-#-%]", "[a-]", "[-a-]"] + ["".join(rnd.choice(alphabet) for _ in range(rnd.randint(1, 8))) for _ in range(3000)]
+    js = page.evaluate("ps => ps.map(p => ToolboxFolder.patternProblem(p) === null)", patterns)
+    assert js == [pattern_problem(p) is None for p in patterns], [p for p, a in zip(patterns, js) if a != (pattern_problem(p) is None)][:10]
+    rules = [{"zip_has": {"file": "scène.json"}}, {"zip_has": {"file": "a b.json"}}, {"zip_has": {"file": "tab\t.json"}}]
+    assert page.evaluate("rs => rs.map(r => ToolboxFolder.ruleProblem(r) === null)", rules) == [rule_problems(r, "") == [] for r in rules] == [False, True, False]
+    base = {"id": "com.example.w", "name": "W", "extensions": [".w"], "by_content": True}
+    types = [dict(base, detect={"starts_with": "W"}), dict(base, detect={"head_matches": "W"}),
+             dict(base, detect={"all": [{"starts_with": "W"}, {"not": {"head_matches": "x"}}]}),
+             dict(base, detect={"any": [{"zip_has": {"file": "w.json"}}]}), dict(base, id="w", detect={"head_matches": "W"})]
+    for own in (True, False):
+        js = page.evaluate("([ts, own]) => ts.map(t => ToolboxFolder.typeProblem(t, own) === null)", [types, own])
+        assert js == [type_problems(t, "", own=own) == [] for t in types], (own, js)
+    assert page.evaluate("([ts]) => ts.map(t => ToolboxFolder.typeProblem(t, true) === null)", [types]) == [True, False, False, True, False]
+
+
+def _cancel_first(folder):
+    (folder / "cancel.json").write_text(json.dumps({"format": "toolbox-cancel", "version": "0.2", "job": JOB1,
+                                                    "asked": "2026-11-18T19:52:00+01:00"}), "utf-8")
+
+
+def _pair(folder):
+    data = (folder / "sample-house.hpscene").read_bytes()
+    for n in ("ſ.hpscene", "s.hpscene"):
+        (folder / n).write_bytes(data)
+    _edit_job(folder, lambda d: d.update(files=[{"name": n, "type": "hpscene", "size": len(data)} for n in ("ſ.hpscene", "s.hpscene")]))
+
+
+def _renamed(name):
+    def change(folder):
+        (folder / "sample-house.hpscene").rename(folder / name)
+        _edit_job(folder, lambda d: d["files"][0].update(name=name))
+    return change
+
+
+JOBS_0_2 = {
+    "cancelled before it was taken": (_cancel_first, "cancelled"),
+    "a reply from another tool": (lambda f: _edit_job(f, lambda d: (d.pop("return"), d.update(reply_to={"tool": "nl.fresing.other", "job": JOB1}))), "bad-job"),
+    "a reply that asks for a reply": (_set("reply_to", {"tool": PLANNER, "job": JOB1}), "bad-job"),
+    "a missing file": (lambda f: (f / "sample-house.hpscene").unlink(), "bad-job"),
+    "a short file": (lambda f: (f / "sample-house.hpscene").write_bytes(b"PK"), "bad-job"),
+    "a device name": (_renamed("COM¹.hpscene"), "bad-job"),
+    "con with a space": (_renamed("con .hpscene"), "bad-job"),
+    "a name that is not NFC": (_renamed("hé.hpscene"), "bad-job"),
+    "a name of 81 characters": (_renamed("x" * 73 + ".hpscene"), "bad-job"),
+    "a name of 80 characters": (_renamed("x" * 72 + ".hpscene"), "ok"),
+    "two names that are one": (_pair, "bad-job"),
+    "a job 65 levels deep": (_set("options", json.loads(b'{"a":' * 63 + b"{}" + b"}" * 63)), "bad-job"),
+    "a job 64 levels deep": (_set("options", json.loads(b'{"a":' * 62 + b"{}" + b"}" * 62)), "ok"),
+    "a size of 2^53": (lambda f: _edit_job(f, lambda d: d["files"][0].update(size=2**53)), "bad-job"),
+    "a job id of 33": (_set("job", "2" * 33), "bad-job"),
+    "a name that is NFC and not ASCII": (_renamed("hé på hytta.hpscene"), "ok"),
+}
+
+
+@pytest.mark.parametrize("name", JOBS_0_2)
+def test_0_2_jobs_get_the_same_answer(page, tmp_path, name):
+    change, expect = JOBS_0_2[name]
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    folder = box / "tools" / RENDER / "inbox" / JOB1
+    (folder / "status.json").unlink()
+    change(folder)
+    try:
+        F.take(box, F.read_tool(box, RENDER), folder)
+        py = "ok"
+    except F.JobProblem as p:
+        py = p.code
+    except FileNotFoundError:
+        py = "not-complete"
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    r = page.evaluate("""async ([me, id]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      return harness.tried(() => box.take(m, id).then(() => 'ok')); }""", [RENDER, JOB1])
+    js = r.get("code") or r.get("ok")
+    assert py == js == expect, (py, r)
+
+
+def test_0_2_refuse_write_and_take_up_do_the_same(page, tmp_path):
+    """cancelled before it was taken (P21); a final status is never written over and a failed one has a code (P1,
+    P23); only a job nobody has updated for 5 minutes is taken up (P1)"""
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    old = (datetime.now().astimezone() - timedelta(minutes=6)).isoformat(timespec="seconds")
+    st2 = box / "tools" / RENDER / "inbox" / JOB2 / "status.json"
+    st2.write_text(st2.read_text("utf-8").replace("2026-11-18T20:31:02+01:00", old), "utf-8")
+    (box / "tools" / RENDER / "inbox" / JOB2 / "cancel.json").unlink()
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    js = page.evaluate("""async ([me, j1, j2]) => { const box = await harness.box(me), out = [];
+      out.push((await box.unfinished()).map(x => x.id));
+      out.push(await box.writeStatus(j1, 'working'));           // j1 is done: never written over
+      out.push(await box.takeUp(j1, 'working'));
+      out.push(await box.takeUp(j2, 'failed', { text: 'Closed while it worked on this' }));
+      out.push(await box.takeUp(j2, 'working'));
+      const st = await box._status(j2); out.push([st.state, st.code]);
+      return out; }""", [RENDER, JOB1, JOB2])
+    py = [[f.name for f, _ in F.unfinished(box, RENDER)], F.write_status(box, RENDER, JOB1, "working"),
+          F.take_up(box, RENDER, JOB1, "working"), F.take_up(box, RENDER, JOB2, "failed", text="Closed while it worked on this"),
+          F.take_up(box, RENDER, JOB2, "working")]
+    st = F.read_status(box, RENDER, JOB2)
+    py.append([st["state"], st["code"]])
+    assert js == py == [[JOB2], False, False, True, False, ["failed", "error"]]
+    assert check(box).items == [], check(box).text()
+    out = dump_and_check(page, tmp_path, "js")
+    assert F.read_status(out, RENDER, JOB2)["state"] == "failed"
+    at = datetime(2026, 11, 18, 20, 0, 0, tzinfo=timezone.utc)
+    cases = [{"state": s, "updated": (at - timedelta(seconds=a)).isoformat(timespec="seconds")}
+             for s in ("waiting", "working", "done", "failed", "cancelled") for a in (0, 299, 301, 9999)] + [None, {"state": "waiting"}]
+    js = page.evaluate("([cases, at]) => cases.map(c => ToolboxFolder.isLeft(c, at))", [cases, int(at.timestamp() * 1000)])
+    assert js == [F.is_left(c, at) for c in cases] and js.count(True) == 5
+
+
+def test_0_2_a_cancelled_job_is_refused_as_cancelled_by_both(page, tmp_path):
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    (box / "tools" / RENDER / "inbox" / JOB2 / "status.json").unlink()
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    js = page.evaluate("""async ([me, id]) => { const box = await harness.box(me), m = (await box.tool(me)).manifest;
+      try { await box.take(m, id); } catch (e) { await box.refuse(id, e); } return box._status(id); }""", [RENDER, JOB2])
+    try:
+        F.take(box, F.read_tool(box, RENDER), box / "tools" / RENDER / "inbox" / JOB2)
+    except F.JobProblem as p:
+        F.refuse(box, RENDER, JOB2, p)
+    py = F.read_status(box, RENDER, JOB2)
+    assert [js["state"], "code" in js] == [py["state"], "code" in py] == ["cancelled", False]
+    dump_and_check(page, tmp_path, "js")
+
+
+def test_0_2_cleaning_up_is_the_same(page, tmp_path):
+    """7.4 by created and by the final status's updated, never by the folder's date (a page cannot read it)"""
+    box = tmp_path / "Toolbox"
+    write_tree(manifests_only(), box)
+    now = datetime.now().astimezone()
+    jobs = {}
+    for name, created, state, updated in (("young", 0, None, None), ("old", 31, None, None), ("done-today", 0, "done", 0.5),
+                                          ("done-before", 3, "done", 2), ("working-long", 40, "working", 0.1)):
+        j = F.send(box, PLANNER, RENDER, "bake-house", [SAMPLES / "files" / "sample-house.hpscene"])
+        _edit_job(box / "tools" / RENDER / "inbox" / j, lambda d, c=created: d.update(created=(now - timedelta(days=c)).isoformat(timespec="seconds")))
+        if state:
+            F.claim(box, RENDER, j, state)
+            st = box / "tools" / RENDER / "inbox" / j / "status.json"
+            doc = json.loads(st.read_text("utf-8"))
+            doc["updated"] = (now - timedelta(days=updated)).isoformat(timespec="seconds")
+            st.write_text(json.dumps(doc), "utf-8")
+        jobs[j] = name
+        time.sleep(1.05)                                       # job ids carry the second
+    stray = box / "tools" / RENDER / "inbox" / "20260101-000000-nojobjson"
+    stray.mkdir()
+    (stray / "part.step").write_bytes(b"x")
+    (box / "tools" / RENDER / "inbox" / "20260101-000000-emptyfolder").mkdir()
+    page.evaluate("""async ([t, me]) => { await harness.load(t); const root = await harness.root();
+      const inbox = await (await (await root.getDirectoryHandle('tools')).getDirectoryHandle(me)).getDirectoryHandle('inbox');
+      await inbox.getDirectoryHandle('20260101-000000-emptyfolder', { create: true }); }""", [tree_of(box), RENDER])
+    for days in (0, 2, 32):
+        at = time.time() + days * F.DAY
+        F.clean(box, RENDER, at=at)
+        js = page.evaluate("async ([me, at]) => { const box = await harness.box(me); await box.clean(at); return (await harness.dump()); }",
+                           [RENDER, int(at * 1000)])
+        js_jobs = sorted({k.split("/")[3] for k in js if "/inbox/" in k})
+        assert page.evaluate("""async me => { const box = await harness.box(me); const t = await box._tool(me), inbox = await t.getDirectoryHandle('inbox');
+          try { await inbox.getDirectoryHandle('20260101-000000-emptyfolder'); return true; } catch (e) { return false; } }""", RENDER)
+        py_jobs = sorted(p.name for p in (box / "tools" / RENDER / "inbox").iterdir() if p.name != "20260101-000000-emptyfolder")
+        assert js_jobs == py_jobs, (days, js_jobs, py_jobs)
+        assert (box / "tools" / RENDER / "inbox" / "20260101-000000-emptyfolder").is_dir()
+    left = {jobs.get(j, j) for j in py_jobs}
+    assert left == set(), left
+
+
+def test_0_2_send_writes_nfc_names_and_refuses_a_pair(page, tmp_path):
+    page.evaluate("t => harness.load(t)", manifests_only())
+    scene = b64((SAMPLES / "files" / "sample-house.hpscene").read_bytes())
+    r = page.evaluate("""async ([me, to, data]) => { const box = await harness.box(me);
+      const ok = await box.send({ to, action: 'bake-house', files: [harness.file('he\\u0301.hpscene', data)] });
+      const pair = await harness.tried(() => box.send({ to, action: 'bake-house', files: [harness.file('\\u017f.hpscene', data), harness.file('s.hpscene', data)] }));
+      return [ok, pair.code]; }""", [PLANNER, RENDER, scene])
+    out = dump_and_check(page, tmp_path)
+    assert json.loads((out / "tools" / RENDER / "inbox" / r[0] / "job.json").read_text("utf-8"))["files"][0]["name"] == "hé.hpscene"
+    assert r[1] == "bad-name"

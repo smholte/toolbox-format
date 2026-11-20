@@ -1,6 +1,6 @@
 {
   "format": "toolbox-types",
-  "version": "0.1",
+  "version": "0.2",
   "types": [
     { "id": "hpscene", "name": "House Planner scene", "extensions": [".hpscene"], "by_content": true,
       "detect": { "zip_json": { "file": "scene.json", "field": "format", "equals": "house-scene" } } },

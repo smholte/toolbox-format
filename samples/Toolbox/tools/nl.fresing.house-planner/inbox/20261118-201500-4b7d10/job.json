@@ -1,6 +1,6 @@
 {
   "format": "toolbox-job",
-  "version": "0.1",
+  "version": "0.2",
   "job": "20261118-201500-4b7d10",
   "created": "2026-11-18T20:15:00+01:00",
   "from": "nl.fresing.render",
