@@ -95,3 +95,9 @@ GitHub runs the same at every push (`.github/workflows/check.yml`).
   test (monkeypatch), do not trust a stress loop alone.
 - Any text a tool passes on (an error message as a status `text`) can hold a line break or a broken character; 3.4
   then makes the whole file unreadable. The reference code cleans such text before it writes (`one_line`).
+- From round 2 of format 0.2 (21 Nov 2026): Windows refuses to replace a file another program has open for as long as
+  it holds it (Fresing Render measured up to 0.5 s), so a status write may be refused at any time; a job must never
+  stop for it (W3). In a browser the same refusal is a `NoModificationAllowedError` while another writer holds the
+  file (`createWritable({mode: 'exclusive'})` makes one in a test). On Windows, `open(path, "xb")` on a folder gives
+  `PermissionError`, not `FileExistsError` – found by the first run of the tests on `windows-latest`, which now runs
+  them at every push (Python 3.11 and 3.13; Blender 5.2 runs 3.13).

@@ -104,7 +104,9 @@ review offered a choice, the simpler rule was taken; that is said below.
   false and the next update writes it. Final: tried for 2 s (about 4× the longest refusal), then the error; the
   caller writes it at its next look. `send_reply()` / `sendReply()` carry the sent reply's id on that error. In a
   browser the same refusal comes from another writer holding the file (tested in Chrome) and, on Windows, from a
-  program that reads it. Also: the tests now run on Windows (GitHub's `windows-latest`) at every push.
+  program that reads it. Also: the tests now run on Windows (GitHub's `windows-latest`) at every push. Their first
+  run found one crash only Windows has: Python's `claim()` on a job whose `status.json` is a folder (Windows says
+  "permission denied", not "exists"); it now returns false, as on Linux and in JavaScript.
 - **Found by an independent review of this branch, and fixed:** a status `text` with a line break (an error message)
   made `status.json` unreadable, after which a final status could be written over; a key that is not UTF-8 in a job
   crashed Python's `refuse()` and left an empty `status.json`, and `check.py` crashed printing it; the first design

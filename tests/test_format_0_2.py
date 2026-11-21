@@ -606,3 +606,20 @@ def test_w3_the_stand_in_bakes_on_while_a_reader_holds_status_json_open(tmp_path
     assert len(F.pending(root, PLANNER)) == 1
     if os.name == "nt":
         assert refused[0] > 0, "Windows refused no write while status.json was held open"
+
+
+def test_claim_on_windows_a_folder_named_status_json_is_not_a_crash(box, monkeypatch):
+    """found by the tests' first run on Windows (round 2): there open(..., "xb") on a folder gives PermissionError,
+    not FileExistsError. Simulated here; tests/test_web.py ("review texts") meets the real one on Windows."""
+    import builtins
+    folder = fresh(box)
+    (folder / "status.json").mkdir()
+    real = builtins.open
+
+    def windows_open(file, mode="r", *a, **k):
+        if Path(file).name == "status.json" and "x" in mode and Path(file).exists():
+            raise PermissionError(13, "Permission denied", str(file))
+        return real(file, mode, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", windows_open)
+    assert F.claim(box, RENDER, JOB1, "working") is False

@@ -277,12 +277,17 @@ def claim(root: Path, me: str, job: str, state: str = "waiting", **more) -> bool
     """Take a job: create its status.json only if it is not there yet. False when another copy of this tool was
     first (6.3). ``more``: fraction, text, code as for write_status."""
     data = _bytes(_status_doc(job, state, **more))      # made before the file: nothing half-made is left
+    path = root / "tools" / me / "inbox" / job / "status.json"
     try:
-        with open(root / "tools" / me / "inbox" / job / "status.json", "xb") as fh:
+        with open(path, "xb") as fh:
             fh.write(data)
         return True
     except FileExistsError:
         return False
+    except PermissionError:                 # Windows says this, not "exists", when status.json is a folder or held
+        if os.path.lexists(path):
+            return False
+        raise
 
 
 def refuse(root: Path, me: str, job: str, problem: JobProblem) -> bool:
