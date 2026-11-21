@@ -355,6 +355,12 @@ $('watch').onclick = async () => {
 };
 $('stop').onclick = () => { watching = false; log('Stopped watching.'); };
 addEventListener('pagehide', () => { if (box && watching) box.notAlive().catch(() => {}); });
+/** a final status another program holds open right now (Windows refuses the write) is written again at the next looks */
+async function writeFinal(id, state, extra) {
+  for (let n = 0; n < 30; n++) {
+    try { await box.writeStatus(id, state, extra); return; } catch (e) { log(`Status ${state} of ${id} cannot be written right now (${e.name}); trying again.`); await sleep(2000); }
+  }
+}
 async function bake(id) {
   let taken;
   try { taken = await box.take(MANIFESTS[RECEIVER], id); } catch (e) {
@@ -367,13 +373,18 @@ async function bake(id) {
   log(`Took job ${id} from ${job.from}: ${house.name}, ${house.file.size} bytes, checked as ${house.type}.`);
   for (let s = 1; s <= total; s++) {
     await sleep(1000);
-    if (await box.wantsCancel(id)) { await box.writeStatus(id, 'cancelled', { text: 'Stopped because the sender asked' }); show('watchState', 'The sender cancelled the job.', 'warn'); log(`Job ${id} cancelled after ${secs(performance.now() - t0)}.`); $('rbar').style.width = '0'; return; }
+    if (await box.wantsCancel(id)) { await writeFinal(id, 'cancelled', { text: 'Stopped because the sender asked' }); show('watchState', 'The sender cancelled the job.', 'warn'); log(`Job ${id} cancelled after ${secs(performance.now() - t0)}.`); $('rbar').style.width = '0'; return; }
     const moment = Math.min(8, Math.ceil(8 * s / total));
     await box.writeStatus(id, 'working', { fraction: s / total, text: `Baking moment ${moment} of 8` });
     $('rbar').style.width = (100 * s / total) + '%'; show('watchState', `"Baking" ${job.title || house.name}: moment ${moment} of 8…`);
   }
   const mb = house.file.size > 50 * 1048576 ? 100 : 0;
-  const reply = await box.sendReply(job, [madeUp('hpbake', mb, `answer to job ${id}`)], 'Baked 8 moments');
+  let reply;
+  try { reply = await box.sendReply(job, [madeUp('hpbake', mb, `answer to job ${id}`)], 'Baked 8 moments'); } catch (e) {
+    if (!('reply' in e)) throw e;             // the bake went out; only the status 'done' waits: never send twice
+    reply = e.reply; log(`Status done of ${id} cannot be written right now (${e.name}); trying again.`);
+    await writeFinal(id, 'done', { text: e.text, reply });
+  }
   show('watchState', reply ? `Sent the bake back to ${job.from}. Watching the inbox.` : 'Baked, but the bake could not be sent back (see the job\'s status).', reply ? 'good' : 'warn');
   log(`Job ${id} done in ${secs(performance.now() - t0)}; bake sent back as job ${reply}.`);
   $('rbar').style.width = '0';

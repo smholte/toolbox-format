@@ -459,3 +459,150 @@ def test_a_cancel_without_a_job_json_is_left_alone(box):
     (folder / "status.json").unlink()
     (folder / "job.json").unlink()
     assert take(box, folder) == "not-complete"
+
+
+# ---------------------------------------------------------------- W3: a refused status write (lead review, round 2)
+# Fresing Render measured on Windows (their task 0245): a reader that holds status.json open blocks the replace as
+# long as it holds it, up to 0.5 s. On Linux nothing blocks, so the refusal is simulated; the test with a real
+# reader holding the file runs everywhere and sees real refusals on Windows (NTFS).
+def refusing(monkeypatch, seconds: float):
+    """os.replace onto status.json is refused (as Windows does) until `seconds` from now; returns the count"""
+    real, until, count = os.replace, time.monotonic() + seconds, [0]
+
+    def replace(src, dst):
+        if Path(dst).name == "status.json" and time.monotonic() < until:
+            count[0] += 1
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(F.os, "replace", replace)
+    return count
+
+
+def test_w3_a_refused_working_status_is_not_written_now_and_nothing_is_left(box, monkeypatch):
+    folder = fresh(box)
+    assert F.claim(box, RENDER, JOB1, "working", fraction=0.0)
+    count = refusing(monkeypatch, 60)
+    assert F.write_status(box, RENDER, JOB1, "working", fraction=0.5) is False     # no exception: the job goes on
+    assert F.write_status(box, RENDER, JOB1, "waiting", text="Bake now?") is False
+    assert count[0] >= 2
+    assert F.read_status(box, RENDER, JOB1)["fraction"] == 0.0                     # the old one, whole
+    assert sorted(p.name for p in folder.iterdir() if p.name.endswith(".tmp")) == []
+
+
+def test_w3_a_final_status_waits_out_a_half_second_reader(box, monkeypatch):
+    fresh(box)
+    assert F.claim(box, RENDER, JOB1, "working")
+    refusing(monkeypatch, 0.5)
+    assert F.write_status(box, RENDER, JOB1, "done", text="Baked") is True
+    assert F.read_status(box, RENDER, JOB1)["state"] == "done"
+
+
+def test_w3_a_final_status_refused_for_longer_raises_after_2_seconds(box, monkeypatch):
+    folder = fresh(box)
+    assert F.claim(box, RENDER, JOB1, "working")
+    refusing(monkeypatch, 60)
+    start = time.monotonic()
+    with pytest.raises(PermissionError):
+        F.write_status(box, RENDER, JOB1, "failed", code="error", text="x")
+    assert 1.9 <= time.monotonic() - start < 4
+    assert F.read_status(box, RENDER, JOB1)["state"] == "working"                  # the caller writes it again later
+    assert not [p for p in folder.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_w3_send_reply_hands_back_the_reply_id_when_done_is_refused(box, monkeypatch, tmp_path):
+    """the reply went out; the caller writes "done" again with the same id and never sends twice"""
+    folder = fresh(box)
+    manifest = F.read_tool(box, RENDER)
+    job, files = F.take(box, manifest, folder)
+    assert F.claim(box, RENDER, JOB1, "working")
+    out = tmp_path / "out" / "bake.hpbake"
+    out.parent.mkdir()
+    shutil.copy(SAMPLES / "files" / "sample-house.hpbake", out)
+    refusing(monkeypatch, 60)
+    monkeypatch.setattr(F, "FINAL_PATIENCE", 0.1)
+    with pytest.raises(PermissionError) as e:
+        F.send_reply(box, manifest, job, [out], text="Baked")
+    monkeypatch.undo()
+    assert e.value.reply and (box / "tools" / job["from"] / "inbox" / e.value.reply / "job.json").is_file()
+    assert F.write_status(box, RENDER, JOB1, "done", text=e.value.text, reply=e.value.reply)
+    assert F.read_status(box, RENDER, JOB1)["reply"] == e.value.reply
+
+
+def _run_stand_in(root, job_seconds, hold):
+    """the stand-in's bake() in this process while `hold` runs beside it; returns (state, its lines)"""
+    from tools.standin import bake, manifest
+    me = manifest("nl.fresing.trial.receiver")
+    F.ensure_folder(root)
+    F.write_manifest(root, me)
+    F.write_manifest(root, json.loads((SAMPLES / "Toolbox" / "tools" / PLANNER / "toolbox.json").read_text("utf-8")))
+    job = F.send(root, PLANNER, me["id"], "bake-house", [SCENE], ret="import-bake")
+    folder = root / "tools" / me["id"] / "inbox" / job
+    lines, stop = [], threading.Event()
+    t = threading.Thread(target=hold, args=(folder / "status.json", stop), daemon=True)
+    t.start()
+    try:
+        state = bake(root, me, folder, job_seconds, lines.append)
+    finally:
+        stop.set()
+        t.join()
+    return state, job, me["id"], lines
+
+
+def test_w3_the_stand_in_bakes_on_while_its_status_is_refused(tmp_path, monkeypatch):
+    """simulated on every system: every status write refused for the first 1.5 s (working), then from 1.9 s for
+    3.6 s, longer than write_status waits for "done" (2 s): the stand-in writes it again at its next look"""
+    root = tmp_path / "Toolbox"
+    real, start, count = os.replace, time.monotonic(), [0]
+
+    def replace(src, dst):
+        if Path(dst).name == "status.json" and (time.monotonic() - start < 1.5 or 1.9 < time.monotonic() - start < 5.5):
+            count[0] += 1
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real(src, dst)
+
+    monkeypatch.setattr(F.os, "replace", replace)
+    monkeypatch.setattr("tools.standin.LOOK", 0.2)
+    state, job, me, lines = _run_stand_in(root, 2, lambda path, stop: stop.wait())
+    assert state == "done" and count[0] > 0, lines
+    assert any("status done" in x and "trying again" in x for x in lines), lines
+    st = F.read_status(root, me, job)
+    assert st["state"] == "done" and st["reply"], st
+    assert len(F.pending(root, PLANNER)) == 1                                    # the bake was sent once
+    assert check(root).items == [], check(root).text()
+
+
+def test_w3_the_stand_in_bakes_on_while_a_reader_holds_status_json_open(tmp_path):
+    """a real reader: it opens status.json and holds it 0.5 s, again and again, while the stand-in bakes. On Windows
+    every write in that time is refused; elsewhere none is. Either way the bake ends "done" and is sent back once."""
+    root = tmp_path / "Toolbox"
+    refused = [0]
+    real = F.os.replace
+
+    def counting(src, dst):
+        try:
+            return real(src, dst)
+        except PermissionError:
+            refused[0] += 1
+            raise
+
+    def hold(path, stop):
+        while not stop.is_set():
+            try:
+                with open(path, "rb"):
+                    stop.wait(0.5)
+            except OSError:
+                pass                                    # not there yet, or just being replaced
+            stop.wait(0.05)
+
+    F.os.replace = counting
+    try:
+        state, job, me, lines = _run_stand_in(root, 3, hold)
+    finally:
+        F.os.replace = real
+    assert state == "done", lines
+    st = F.read_status(root, me, job)
+    assert st["state"] == "done" and st["reply"], st
+    assert len(F.pending(root, PLANNER)) == 1
+    if os.name == "nt":
+        assert refused[0] > 0, "Windows refused no write while status.json was held open"

@@ -920,3 +920,43 @@ def test_0_2_review_texts_keys_and_odd_entries_are_handled_the_same(page, tmp_pa
       return out; }""", [RENDER, JOB2, texts])
     assert js == [F.one_line(t) for t in texts]
     assert js[0] == "Error: line 2 \ufffd end" and len(js[2]) == 200 and js[3] == "a b"
+
+
+def test_w3_a_refused_status_write_is_handled_the_same(page, tmp_path, monkeypatch):
+    """W3 (lead review of 0.2, round 2): in a browser the write is refused while another writer holds the file (here
+    an exclusive writable, as another tab or program; on Windows also a program that reads it). Not final: false,
+    nothing thrown. Final: waits out a short hold, throws after the patience. sendReply hands back the reply's id."""
+    box = tmp_path / "Toolbox"
+    shutil.copytree(SAMPLES / "Toolbox", box)
+    for name in ("status.json", "cancel.json"):
+        (box / "tools" / RENDER / "inbox" / JOB2 / name).unlink(missing_ok=True)
+    page.evaluate("t => harness.load(t)", tree_of(box))
+    js = page.evaluate("""async ([me, id, bake]) => { const box = await harness.box(me), out = [], m = (await box.tool(me)).manifest;
+      const folder = await box._job(me, id);
+      const hold = async (ms) => { const w = await (await folder.getFileHandle('status.json')).createWritable({ mode: 'exclusive' });
+        return new Promise(ok => setTimeout(async () => { await w.abort(); ok(); }, ms)); };
+      const { job } = await box.take(m, id);
+      out.push(await box.claim(id, 'working', { fraction: 0 }));
+      let held = hold(1500);
+      out.push(await box.writeStatus(id, 'working', { fraction: 0.5 }));          // refused: false, no throw
+      out.push(await box.writeStatus(id, 'waiting', { text: 'Bake now?' }));
+      out.push((await box._status(id)).fraction);
+      ToolboxFolder.settings.finalPatience = 0.2;
+      try { await box.writeStatus(id, 'failed', { code: 'error' }); out.push('written'); } catch (e) { out.push(e.name); }
+      let reply = null;
+      try { await box.sendReply(job, [harness.file('bake.hpbake', bake)], 'Baked'); out.push('written'); } catch (e) { reply = e.reply; out.push([e.name, !!e.reply, e.text]); }
+      out.push((await box._status(id)).state);
+      await held;
+      ToolboxFolder.settings.finalPatience = 2;
+      held = hold(500);
+      const t0 = performance.now();
+      out.push(await box.writeStatus(id, 'done', { text: 'Baked', reply }));      // waits out half a second
+      out.push(performance.now() - t0 >= 400);
+      await held;
+      const st = await box._status(id); out.push([st.state, st.reply === reply]);
+      const back = []; for await (const [n] of (await box._job('nl.fresing.house-planner', reply) ? [[reply]] : [])) back.push(n);
+      out.push(back.length);
+      return out; }""", [RENDER, JOB2, b64((SAMPLES / "files" / "sample-house.hpbake").read_bytes())])
+    assert js == [True, False, False, 0, "NoModificationAllowedError",
+                  ["NoModificationAllowedError", True, "Baked"], "working", True, True, ["done", True], 1], js
+    dump_and_check(page, tmp_path, "js")

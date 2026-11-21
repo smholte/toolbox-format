@@ -89,7 +89,11 @@ ignore entries it does not know (browsers leave short-lived `.crswap` files whil
 **Other programs read and write at the same moment.** Windows refuses to replace or delete a file another program has
 open. So everywhere in this format: a write by rename, or a delete, that fails is tried again at the next look; a
 reader that finds a file missing, empty or half there treats it as "not there yet" and tries again at its next look.
-Neither is an error.
+Neither is an error. A reader may hold a file open for a moment (half a second was measured on Windows), so a refusal is
+normal, also for a tool's own `status.json` while its sender reads it. **A refused status write never stops a job:**
+a status that is not final (`waiting`, `working`) that cannot be written now is simply written at the next update; a
+final status (`done`, `failed`, `cancelled`) is tried again until it is written. A result that went out is never sent
+a second time because its status waited.
 
 **A tool may run as several copies** that share one tool folder and one inbox: two windows of a program, a page open
 in two tabs, a web tool's page and a downloaded copy of it. Section 6.3 says how only one copy takes a job.
@@ -669,3 +673,4 @@ The first independent review (task 0001) found 29 rule problems (P1–P29), the 
 | P30 | A job with a final status may have lost its files | 7.4 |
 | P31 | A job the user declines ends `cancelled`; `failed` is for "could not" | 6.3, 7.1 |
 | P32 | Web Locks cover one origin; copies on other origins rely on "only what I can place" | 6.3, 9 |
+| W3 | A refused status write never stops a job: a status that is not final is written at the next update, a final one is tried again until written (lead review, 21 Nov 2026, from Fresing Render's Windows measurements) | 2 |

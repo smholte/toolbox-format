@@ -27,6 +27,13 @@
 10. **Fresing Render, please check:** a native tool that may run as several copies does not delete `alive.json` when
    it closes (6.4); and the jobs Fresing Render finishes may lose their files right away without the checker
    complaining (P30).
+11. **A refused status write never stops a job (W3).** On Windows a program that reads `status.json` blocks the
+   write for as long as it holds the file (up to half a second, measured by Fresing Render). `write_status()` /
+   `writeStatus()` now return false for a refused `waiting` or `working` (write it at the next update, as you do
+   anyway) and try a final status for 2 seconds before they throw – then write it again at your next look.
+   `send_reply()` / `sendReply()` put the reply's id on that error (`.reply`, `.text`): write `done` with it, never
+   send the result twice. The stand-in and the trial page show how. Before: the first refusal after 0.25 s threw,
+   and the stand-in stopped in the middle of a bake.
 
 ### Each change and what an app has to do
 
@@ -92,6 +99,12 @@ review offered a choice, the simpler rule was taken; that is said below.
 - **P31 – declined (6.3, 7.1).** A job the user declines ends `cancelled`; `failed` is for "could not".
 - **P32 – Web Locks (6.3, 9).** They cover one origin; copies on other origins rely on "only what I can place" and
   write the status at once when they take a job.
+- **W3 – a refused status write (2; lead review, 21 Nov 2026).** Fresing Render measured on Windows that a reader
+  holding `status.json` blocks its replace for up to 0.5 s. Not final: `write_status()` / `writeStatus()` return
+  false and the next update writes it. Final: tried for 2 s (about 4× the longest refusal), then the error; the
+  caller writes it at its next look. `send_reply()` / `sendReply()` carry the sent reply's id on that error. In a
+  browser the same refusal comes from another writer holding the file (tested in Chrome) and, on Windows, from a
+  program that reads it. Also: the tests now run on Windows (GitHub's `windows-latest`) at every push.
 - **Found by an independent review of this branch, and fixed:** a status `text` with a line break (an error message)
   made `status.json` unreadable, after which a final status could be written over; a key that is not UTF-8 in a job
   crashed Python's `refuse()` and left an empty `status.json`, and `check.py` crashed printing it; the first design
@@ -122,7 +135,8 @@ reference code (a test for each that failed before; the review's report is task 
   job field named `constructor` or `toString` (refused), a folder in place of a job's file (`bad-job`), a size no
   file can have (`bad-job`), a `job.json` another program holds open (try again – before: `failed` for good).
 - **Python `send()`** refuses two files whose names differ only in capitals, and shortens a title to 120 characters
-  (as JavaScript did). **`clean()`** deletes only job folders. **Junctions** are told on Python 3.11 too (Blender).
+  (as JavaScript did). **`clean()`** deletes only job folders. **Junctions** are told on Python 3.11 too (which has no `os.path.isjunction`;
+  Blender 5.2 itself runs Python 3.13).
 
 What an app has to change: copy the new `tbf/` files or `web/toolbox-folder.js`. Nothing in the files it writes.
 

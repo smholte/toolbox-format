@@ -27,6 +27,30 @@ jobs:
       - name: Tests (the checker and the folder code on the samples and on broken copies; the JavaScript in the machine's Chrome)
         run: python -m pytest -q tests
 
+  windows-tests:
+    name: Tests on Windows (NTFS), Python ${{ matrix.python }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]          # 3.13 is Blender 5.2's; 3.11 stays supported
+    steps:
+      - name: Keep line endings as in the repository (the samples and types.json are compared byte for byte)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -r requirements.txt
+      - name: Samples are up to date
+        run: python tools/make_samples.py --check
+      - name: The samples and the type list pass the checker
+        run: python check.py samples/Toolbox types.json
+      - name: Tests (the folder code on NTFS - lock file, status rewrite, a reader holding status.json - and the JavaScript in the machine's Chrome)
+        run: python -m pytest -q -rs tests
+
   windows-checks:
     name: Windows checks script (output only)
     runs-on: windows-latest

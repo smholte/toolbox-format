@@ -68,18 +68,20 @@ def _bytes(doc: dict) -> bytes:
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def write_json(path: Path, doc: dict, tries: int = 5):
+def write_json(path: Path, doc: dict, patience: float = 0.25):
     """Whole or not at all: written beside the file, then moved over it. Windows refuses the move while another
-    program has the file open, so it is tried a few times; after that the OSError is the caller's to catch, and the
-    write is done again at its next look (FORMAT.md section 2)."""
+    program has the file open (a reader holds it up to about half a second), so it is tried again for ``patience``
+    seconds; after that the PermissionError is the caller's to catch, and the write is done again at its next look
+    (FORMAT.md section 2)."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}-{secrets.token_hex(4)}.tmp")   # its own: copies write at once
     tmp.write_bytes(_bytes(doc))
-    for n in range(tries):
+    end = time.monotonic() + patience
+    while True:
         try:
             os.replace(tmp, path)
             return
         except PermissionError:
-            if n == tries - 1:
+            if time.monotonic() >= end:
                 tmp.unlink(missing_ok=True)
                 raise
             time.sleep(0.05)
@@ -89,8 +91,9 @@ def write_json(path: Path, doc: dict, tries: int = 5):
 
 
 def is_link(p: Path) -> bool:
-    """a link, or on Windows a junction: never read as a job, never followed when cleaning up. Python 3.11 (the
-    one in Blender) has no os.path.isjunction; the reparse tag of os.lstat tells it there."""
+    """a link, or on Windows a junction: never read as a job, never followed when cleaning up. Python 3.11 has
+    no os.path.isjunction (Blender 5.2 runs Python 3.13, which has it; 3.11 stays supported); the reparse tag of
+    os.lstat tells it there."""
     if p.is_symlink() or getattr(os.path, "isjunction", lambda _p: False)(p):
         return True
     try:
@@ -400,15 +403,28 @@ def take(root: Path, manifest: dict, folder: Path) -> tuple[dict, list[tuple[str
     return job, out
 
 
+FINAL_PATIENCE = 2.0          # seconds a final status keeps trying: about 4x the longest refusal measured on Windows
+
+
 def write_status(root: Path, me: str, job: str, state: str, fraction: float | None = None, text: str | None = None,
                  code: str | None = None, reply: str | None = None) -> bool:
     """Write the status of a job of my inbox (7.1). A final status (done, failed, cancelled) is never written over:
-    the status is read just before, and False returned when it is final already."""
+    the status is read just before, and False returned when it is final already.
+    Windows refuses the write while another program reads status.json (section 2). A status that is not final
+    (waiting, working) is then not written now: False, and the next update writes it – a job never stops for it.
+    A final status keeps trying for 2 seconds, then raises PermissionError: write it again at the next look."""
     old = _read_own_status(root, me, job)
     if old is not None and old["state"] in FINAL:
         return False
-    write_json(root / "tools" / me / "inbox" / job / "status.json",
-               _status_doc(job, state, fraction=fraction, text=text, code=code, reply=reply))
+    path = root / "tools" / me / "inbox" / job / "status.json"
+    doc = _status_doc(job, state, fraction=fraction, text=text, code=code, reply=reply)
+    if state in FINAL:
+        write_json(path, doc, patience=FINAL_PATIENCE)
+        return True
+    try:
+        write_json(path, doc)
+    except PermissionError:
+        return False
     return True
 
 
@@ -418,7 +434,9 @@ def wants_cancel(root: Path, me: str, job: str) -> bool:
 
 def send_reply(root: Path, manifest: dict, job: dict, files: list[Path], text: str | None = None) -> str | None:
     """Section 7.2: send the result back as a job when the first job asked for it and the sender can take it, then
-    write the first job's status "done". Returns the reply job's id, or None when the result stays here."""
+    write the first job's status "done". Returns the reply job's id, or None when the result stays here.
+    When the status "done" cannot be written right now (Windows refuses, see write_status), the PermissionError
+    carries the reply's id as ``.reply`` and ``.text``: write the status again with them; never send twice."""
     me, reply = manifest["id"], None
     if "return" in job and files and (root / "tools" / job["from"]).is_dir():
         try:
@@ -426,7 +444,11 @@ def send_reply(root: Path, manifest: dict, job: dict, files: list[Path], text: s
                          reply_to={"tool": me, "job": job["job"]})
         except ValueError as e:
             text = f"Done, but the result could not be sent back: {e}"
-    write_status(root, me, job["job"], "done", text=text, reply=reply)   # not over a final status (cancelled)
+    try:
+        write_status(root, me, job["job"], "done", text=text, reply=reply)   # not over a final status (cancelled)
+    except PermissionError as e:
+        e.reply, e.text = reply, text
+        raise
     return reply
 
 

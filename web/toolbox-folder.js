@@ -539,6 +539,20 @@
     const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
     try { await w.write(data); await w.close(); } catch (e) { try { await w.abort(); } catch (e2) { /* closed already */ } throw e; }
   }
+  /** errors a write gets when another program holds the file (Windows refuses the swap) or another writer has it
+      (the browser refuses): section 2's "try again at the next look" */
+  const REFUSED = ['NoModificationAllowedError', 'InvalidModificationError', 'InvalidStateError', 'UnknownError'];
+  const refused = (e) => !!e && REFUSED.includes(e.name);
+  const settings = { finalPatience: 2 };      // seconds a final status keeps trying (a reader holds up to 0.5 s)
+  const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+  /** write(), tried again for `patience` seconds while the write is refused */
+  async function writePatient(dir, name, data, patience) {
+    const end = Date.now() + patience * 1000;
+    for (;;) {
+      try { await write(dir, name, data); return; } catch (e) { if (!refused(e) || Date.now() >= end) throw e; }
+      await sleep(50);
+    }
+  }
   /** a JSON file of the format, checked: the object, null when the file is missing; TbError otherwise */
   async function readDoc(dir, name, kind) {
     const f = await fileOf(dir, name);
@@ -800,7 +814,10 @@
 
     /** Write the status of a job of my inbox (7.1): state, and optional fraction, text, code, reply. A failed job
         always has a code ('error' when none is given). A final status is never written over: it is read just before,
-        and false returned when it is final already. */
+        and false returned when it is final already.
+        Another program may hold status.json (Windows refuses the write, section 2). A status that is not final
+        (waiting, working) is then not written now: false, and the next update writes it – a job never stops for
+        it. A final status keeps trying for 2 seconds, then throws: write it again at the next look. */
     async writeStatus(jobId, state, extra = {}) {
       const folder = await this._job(this.me, jobId);
       if (!folder) return false;
@@ -809,20 +826,23 @@
       const doc = { format: 'toolbox-status', version: VERSION, job: jobId, state, updated: now() };
       const more = state === 'failed' && (extra.code === undefined || extra.code === null) ? { ...extra, code: 'error' } : extra;
       for (const k of ['fraction', 'text', 'code', 'reply']) if (more[k] !== undefined && more[k] !== null) doc[k] = k === 'text' ? oneLine(more[k]) : more[k];
-      await write(folder, 'status.json', toJson(doc));
+      if (FINAL.includes(state)) { await writePatient(folder, 'status.json', toJson(doc), settings.finalPatience); return true; }
+      try { await writePatient(folder, 'status.json', toJson(doc), 0.25); } catch (e) { if (refused(e)) return false; throw e; }
       return true;
     }
 
     async wantsCancel(jobId) { const folder = await this._job(this.me, jobId); return !!folder && !!await fileOf(folder, 'cancel.json'); }
 
     /** 7.2: send the result back as a job when the first job asked for it, then write its status 'done'.
-        Returns the reply job's id, or null when the result stays here. */
+        Returns the reply job's id, or null when the result stays here. When the status 'done' cannot be written
+        right now (see writeStatus), the error carries the reply's id as .reply and .text: write the status again
+        with them; never send twice. */
     async sendReply(job, files, text) {
       let reply = null;
       if ('return' in job && files.length && await this._tool(job.from)) {
         try { reply = await this.send({ to: job.from, action: job.return, files, title: job.title, replyTo: { tool: this.me, job: job.job } }); } catch (e) { text = `Done, but the result could not be sent back: ${e.message}`; }
       }
-      await this.writeStatus(job.job, 'done', { text, reply });
+      try { await this.writeStatus(job.job, 'done', { text, reply }); } catch (e) { if (e && typeof e === 'object') { e.reply = reply; e.text = text; } throw e; }
       return reply;
     }
 
@@ -896,6 +916,6 @@
   global.ToolboxFolder = {
     VERSION, TYPES, FINAL, TbError, stalled, isLeft, supported, remembered, remember, forget, pick, permission, open,
     detectType, nameProblem, capitals, timeProblem, patternProblem, ruleProblem, typeProblem, docProblem, manifestProblem,
-    parseJson, toJson, now, newJobId, isToolId, isJobId, crc32,
+    parseJson, toJson, now, newJobId, isToolId, isJobId, crc32, settings,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

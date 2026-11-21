@@ -29,6 +29,22 @@ def manifest(tool_id: str) -> dict:
             "handover": ["inbox"]}
 
 
+LOOK = 2              # seconds between two looks at the inbox
+
+
+def write_final(root: Path, me: str, job: str, state: str, say, **more):
+    """A final status Windows refuses now (another program reads status.json) is written again at the next looks
+    (section 2). write_status itself already tried for 2 seconds."""
+    for _ in range(30):
+        try:
+            F.write_status(root, me, job, state, **more)
+            return
+        except PermissionError as e:
+            say(f"status {state} of {job} cannot be written right now ({e.strerror or e}); trying again")
+            time.sleep(LOOK)
+    say(f"status {state} of {job} could not be written; it will be taken up as left behind")
+
+
 def bake(root: Path, me: dict, folder: Path, seconds: float, say) -> str:
     """do one job; returns its final state"""
     try:
@@ -46,9 +62,10 @@ def bake(root: Path, me: dict, folder: Path, seconds: float, say) -> str:
     steps = max(1, round(seconds))
     for s in range(steps + 1):
         if F.wants_cancel(root, me["id"], job["job"]):
-            F.write_status(root, me["id"], job["job"], "cancelled", text="Stopped because the sender asked")
+            write_final(root, me["id"], job["job"], "cancelled", say, text="Stopped because the sender asked")
             say(f"cancelled {job['job']}")
             return "cancelled"
+        # a refused "working" is not written now (False) and written at the next moment: the bake goes on
         F.write_status(root, me["id"], job["job"], "working", fraction=s / steps,
                        text=f"Baking moment {min(8, 1 + 8 * s // steps)} of 8")
         if s < steps:
@@ -57,7 +74,12 @@ def bake(root: Path, me: dict, folder: Path, seconds: float, say) -> str:
         out = Path(tmp) / (Path(name).stem + ".hpbake")
         out.write_bytes(zipped({"bake.json": js({"format": "house-bake", "version": "1.0",
                                                  "note": f"made-up by the stand-in, answer to job {job['job']}"})}))
-        reply = F.send_reply(root, me, job, [out], text="Baked 8 moments")
+        try:
+            reply = F.send_reply(root, me, job, [out], text="Baked 8 moments")
+        except PermissionError as e:              # the reply went out; only the status "done" waits
+            reply = e.reply
+            say(f"status done of {job['job']} cannot be written right now ({e.strerror or e}); trying again")
+            write_final(root, me["id"], job["job"], "done", say, text=e.text, reply=reply)
     say(f"done {job['job']}; bake sent back as {reply}")
     return "done"
 
@@ -88,13 +110,16 @@ def main(argv=None) -> int:
                         say(f"ended {folder.name}, left {status['state']} by an earlier run")
                 last_left = time.time()
             if time.time() - last_alive > 8:
-                F.write_alive(root, a.me, "0.1")
-                last_alive = time.time()
+                try:
+                    F.write_alive(root, a.me, "0.1")
+                    last_alive = time.time()
+                except PermissionError:               # another program reads alive.json: at the next look (2)
+                    pass
             for folder in F.pending(root, a.me):
                 if bake(root, me, folder, a.seconds, say) != "not-complete" and a.once:
                     return 0
             F.clean(root, a.me)
-            time.sleep(2)
+            time.sleep(LOOK)
     except KeyboardInterrupt:
         return 0
     finally:
